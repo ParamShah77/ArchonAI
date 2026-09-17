@@ -4,16 +4,19 @@ ARCHON understands, analyzes, and reasons about software systems end-to-end. It 
 **Code Graph** of a repository (files, classes, functions, endpoints, tables, dependencies and the
 relationships between them) and layers analysis and AI reasoning on top of it.
 
-## Status
+## Capabilities
 
-| Phase | Scope | State |
+All 20 capabilities from the product vision are implemented (structural analysis always; AI narratives when an LLM key is set):
+
+| Area | What you get | Where |
 |---|---|---|
-| 0 | Foundation, process rules (decisions.md, flow.md, quiz gate) | done |
-| 1 | Ingestion, Code Graph, interactive map, architecture reconstruction | done |
-| 2 | Embeddings, codebase chat, documentation generation | next |
-| 3 | Security / performance / tech-debt / API / DB / dependency analyzers, health score | planned |
-| 4 | Debugging, change impact, feature simulator, planner, code review, log intelligence | planned |
-| 5 | Auth, job queue, deployment | planned |
+| Code graph & map | tree-sitter extractors (Python, JS/TS, Go, Java, SQL, Prisma), cross-file import/call/inheritance resolution, interactive Cytoscape map (system / file / symbol levels, drill-down, search) | Overview, Code Map |
+| Architecture reconstruction | components, layers, entry points, coupling, AI narrative + data flow + risks | Overview |
+| Codebase chat | hybrid BM25 + embedding retrieval over graph chunks, graph facts, citations that open on the map | Chat |
+| Audit | security, performance, tech-debt, dependency, API, database and test analyzers → shared Finding model; triage (resolve/dismiss); engineering health score with history | Audit |
+| Intelligence reports | API inventory with auth coverage and endpoint→table reachability; database schema/relationships/access paths; dependency inventory (unused, undeclared, risky, unpinned); test coverage gaps and riskiest untested code | Intel |
+| Documentation | architecture, API, per-module, data flow (mermaid), database (ER), dependencies, setup, onboarding | Docs |
+| Reasoning tools | debugging/root cause from stack traces, change-impact with risk score, feature simulator, engineering planner, architecture advisor, refactoring proposals, test generation, code review of diffs, incident & log intelligence | Tools |
 
 ## Quick start
 
@@ -38,7 +41,17 @@ detect the stack, and render the overview and the code map.
 ## LLM providers (free tiers)
 
 Set `ARCHON_LLM_PROVIDER` to `gemini` (default), `groq`, or `xai` and the matching `*_API_KEY`.
-Without a key, everything structural still works; only AI narratives are disabled.
+Without a key, everything structural still works; only AI narratives are disabled. `mock` is a
+deterministic offline provider used by the tests.
+
+## Deployment
+
+```bash
+cp .env.example .env
+docker compose --profile app up -d --build     # Postgres + API (:8000) + web (:3000)
+```
+Set `ARCHON_API_KEY` in `.env` (and `NEXT_PUBLIC_ARCHON_API_KEY` as a build arg for the web image)
+to require `X-API-Key` on the API.
 
 ## Layout
 

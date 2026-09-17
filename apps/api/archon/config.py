@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     archon_workspace: str = "./workspace"
 
     # API
+    archon_api_key: str = ""  # when set, every request (except /health and the OpenAPI docs) needs X-API-Key
     archon_api_host: str = "127.0.0.1"
     archon_api_port: int = 8000
     archon_cors_origins: str = "http://localhost:3000"

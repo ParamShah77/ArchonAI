@@ -93,3 +93,22 @@ async def test_graph_requires_ready_repo(client: AsyncClient, tmp_path: Path):
     # status may still be pending/ingesting; either way a non-ready repo is rejected or ready returns 200
     r = await client.get(f"/repos/{rid}/graph")
     assert r.status_code in (200, 409)
+
+
+async def test_api_key_middleware(fixture_repo: Path):
+    import os
+
+    from archon.config import get_settings
+
+    os.environ["ARCHON_API_KEY"] = "s3cret"
+    get_settings.cache_clear()
+    try:
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+                assert (await c.get("/health")).status_code == 200
+                assert (await c.get("/repos")).status_code == 401
+                assert (await c.get("/repos", headers={"X-API-Key": "s3cret"})).status_code == 200
+    finally:
+        os.environ["ARCHON_API_KEY"] = ""
+        get_settings.cache_clear()

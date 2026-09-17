@@ -12,7 +12,8 @@ each session.
 | API server | `apps/api/archon/main.py` → `create_app()` → uvicorn | HTTP responses (JSON) |
 | Web app | `apps/web/app/layout.tsx` → route pages | Rendered UI, calls API |
 | Quiz gate | `scripts/quiz_gate.py` | `.archon/quiz-pass.json` marker |
-| Hook | `.claude/settings.json` → `scripts/quiz_gate.py check` | allow / block a Bash command |
+| Hook (disabled, D-011) | `.claude/settings.json` → `scripts/quiz_gate.py check` | allow / block a Bash command |
+| Docker | `apps/api/Dockerfile`, `apps/web/Dockerfile`, `docker-compose.yml --profile app` | containers on :8000 / :3000 |
 
 ## 2. API request lifecycle
 
@@ -160,6 +161,14 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-09-18 — Phase 4 frontend + Phase 5 hardening
+- `apps/web/src/lib/api.ts`: types + endpoints for findings, runs, health, intel reports, chat, docs, tools; optional `X-API-Key` header.
+- `components/Markdown.tsx` (react-markdown + GFM), `components/JsonView.tsx` (generic structured-result renderer).
+- Pages + panels: `chat/` (`ChatPanel`: conversations, sources → map deep links, reindex), `audit/` (`AuditPanel`: run analyzers with polling, health gauge + dimensions + history, findings filters/triage), `intel/` (`IntelPanel`: API, Database, Dependencies, Tests tabs), `docs/` (`DocsPanel`: generate per kind, markdown viewer), `tools/` (`ToolsPanel`: 9 workflows with a node picker, `ImpactResult`, `ReviewResult`, `LogsResult`).
+- `RepoShell` tabs: Overview · Code Map · Chat · Audit · Intel · Docs · Tools.
+- Phase 5: `apps/api/Dockerfile`, `apps/web/Dockerfile`, `docker-compose.yml` `app` profile (Postgres + API + web); `ARCHON_API_KEY` middleware in `main.py` (D-016); background jobs stay in-process (D-017).
+- Quality fixes after a live run on this repository: query-in-loop detection now needs SQL text, an unambiguous data-access method, or a data-access receiver (`db.`, `session.`, …) — generic `count()/update()/findall()` no longer count; security rules skip regex/rule-definition lines; MD5/SHA1 downgraded to low; test coverage is computed by import reachability from test files (depth 4) instead of direct imports only; softer tests penalty in the health score.
 
 ### Session 2026-09-17/18 — Phases 2–4 backend (analysis, chat, docs, reasoning)
 - Owner disabled the quiz gate (D-011): `CLAUDE.md` Rule 3 marked disabled, hook removed from `.claude/settings.json`.

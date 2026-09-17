@@ -47,7 +47,7 @@ def compute_health(ctx: AnalysisContext, findings: list[dict[str, Any]], reports
     cov = tests_rep.get("coverage_ratio")
     tests_score = 100.0 * cov if cov is not None else 50.0
     tests_score -= min(
-        30.0, 3.0 * len([f for f in by_analyzer.get("tests", []) if f["severity"] in ("high", "medium")])
+        15.0, 1.0 * len([f for f in by_analyzer.get("tests", []) if f["severity"] in ("high", "medium")])
     )
     dims = {
         "security": _penalty_score(by_analyzer.get("security", []), kloc, 6.0),

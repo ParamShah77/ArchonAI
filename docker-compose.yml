@@ -1,5 +1,6 @@
-# Optional infrastructure. ARCHON runs on SQLite by default; start this only
-# when you want Postgres + pgvector (larger repos, concurrent users).
+# Two ways to use this file:
+#   docker compose up -d                 -> Postgres + pgvector only (dev: run API/web locally, set DATABASE_URL)
+#   docker compose --profile app up -d   -> full stack: Postgres + API + web
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -18,5 +19,36 @@ services:
       timeout: 3s
       retries: 10
 
+  api:
+    profiles: ["app"]
+    build: ./apps/api
+    container_name: archon-api
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://archon:archon@postgres:5432/archon
+      ARCHON_WORKSPACE: /data/workspace
+      ARCHON_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8000:8000"
+    volumes:
+      - archon_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    profiles: ["app"]
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_ARCHON_API_URL: http://localhost:8000
+    container_name: archon-web
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
 volumes:
   archon_pgdata:
+  archon_data:

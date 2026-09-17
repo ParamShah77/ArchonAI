@@ -177,3 +177,21 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
 - **Alternatives considered:** Refuse without a key (simplest, but leaves most of ARCHON dark); fake narratives (misleading).
 - **Why this one:** The structural half is often the more trustworthy half, and it makes the AI half auditable.
 - **Consequences:** Prompts carry the facts explicitly, which keeps hallucination low but increases prompt size; budgets are capped per workflow.
+
+## D-016 — Optional shared-secret API key instead of user accounts (Phase 5)
+- **Date:** 2026-09-18
+- **Status:** Accepted
+- **Context:** ARCHON is currently a single-operator tool run locally or on a private host. It needs a way to not be wide open when exposed, without building user management.
+- **Decision:** `ARCHON_API_KEY` (unset by default). When set, an HTTP middleware requires `X-API-Key` on every route except `/health` and the OpenAPI docs; the web app sends `NEXT_PUBLIC_ARCHON_API_KEY`. No users, roles or sessions yet.
+- **Alternatives considered:** OAuth/OIDC login (right for teams, but a large surface for a v1 with one operator); Basic auth (browser prompts are awkward with a SPA); no auth (unsafe once deployed).
+- **Why this one:** Ten lines, zero dependencies, good enough for a private deployment; upgrade path to per-user auth is additive.
+- **Consequences:** The key is baked into the web bundle at build time (public to anyone who can load the app) — acceptable only when the web app itself sits behind the same trust boundary. Multi-user needs D-0xx later.
+
+## D-017 — Keep in-process background tasks; defer Redis/queue
+- **Date:** 2026-09-18
+- **Status:** Accepted (revisit when multiple API replicas or long analyses appear)
+- **Context:** Ingestion and analysis run as FastAPI `BackgroundTasks` with status rows (`repositories.status`, `analysis_runs`). Phase 5 originally planned a Redis-backed queue.
+- **Decision:** Stay in-process. Job state already lives in the database, so a crash leaves an honest `failed`/stale status and re-running is idempotent (findings replaced per analyzer; graph replaced per repo). Docker Compose ships Postgres + API + web without Redis.
+- **Alternatives considered:** arq/Celery + Redis (durable retries, horizontal workers; another service and more ops for a single-node tool); Postgres-backed queue (no new service, but still a worker process to run).
+- **Why this one:** Every current job finishes in seconds to a few minutes on one node; adding infrastructure now buys nothing the owner needs.
+- **Consequences:** A job dies with the process; no retries; CPU-heavy analysis shares the API process (mitigated by `asyncio.to_thread` for parsing).

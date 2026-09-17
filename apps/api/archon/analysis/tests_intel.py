@@ -23,16 +23,28 @@ def build_report(ctx: AnalysisContext) -> dict[str, Any]:
         if not ctx.is_test_path(f.path) and f.language in ("python", "javascript", "typescript", "tsx", "go", "java")
     ]
     tested: dict[str, set[str]] = defaultdict(set)  # source path -> test paths
+    file_ids = {f.id: f for f in files}
     for tf in test_files:
-        for t, _ in rg.out_edges(tf.id, EdgeKind.IMPORTS):
-            tn = rg.nodes.get(t)
-            if tn is not None and tn.kind == NodeKind.FILE and not ctx.is_test_path(tn.path):
-                tested[tn.path].add(tf.path)
-        # name-based fallback: tests/test_foo.py ↔ foo.py
+        # everything reachable from the test through internal imports is exercised by it (depth-limited)
+        frontier, seen, depth = [tf.id], {tf.id}, 0
+        while frontier and depth < 4:
+            nxt = []
+            for fid in frontier:
+                for t, _ in rg.out_edges(fid, EdgeKind.IMPORTS):
+                    tn = file_ids.get(t)
+                    if tn is None or t in seen:
+                        continue
+                    seen.add(t)
+                    nxt.append(t)
+                    if not ctx.is_test_path(tn.path):
+                        tested[tn.path].add(tf.path)
+            frontier, depth = nxt, depth + 1
+        # name-based fallback: tests/test_foo.py <-> foo.py (skip generic names)
         stem = re.sub(r"^(test_)|(_test|\.test|\.spec|_spec|Test)$", "", tf.name.rsplit(".", 1)[0])
-        for sf in src_files:
-            if sf.name.rsplit(".", 1)[0] == stem and stem:
-                tested[sf.path].add(tf.path)
+        if len(stem) >= 3 and stem not in ("__init__", "index", "main", "conftest", "setup"):
+            for sf in src_files:
+                if sf.name.rsplit(".", 1)[0] == stem:
+                    tested[sf.path].add(tf.path)
     test_cases = 0
     for tf in test_files:
         for n in rg.by_kind(NodeKind.FUNCTION, NodeKind.METHOD):

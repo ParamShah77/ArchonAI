@@ -4,6 +4,7 @@
  * falls back to the API's default bind address.
  */
 export const API_URL = process.env.NEXT_PUBLIC_ARCHON_API_URL ?? "http://127.0.0.1:8000";
+const API_KEY = process.env.NEXT_PUBLIC_ARCHON_API_KEY ?? "";
 
 export type RepoStatus = "pending" | "ingesting" | "ready" | "failed";
 
@@ -153,7 +154,7 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "Content-Type": "application/json", ...(API_KEY ? { "X-API-Key": API_KEY } : {}), ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
     let detail = res.statusText;

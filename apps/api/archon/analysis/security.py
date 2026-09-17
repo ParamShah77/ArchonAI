@@ -190,11 +190,11 @@ RULES: list[Rule] = [
     _r(
         "SEC-WEAK-HASH",
         "crypto",
-        Severity.MEDIUM,
+        Severity.LOW,
         "Weak hash algorithm (MD5/SHA1)",
         r"\b(hashlib\.(md5|sha1)|createHash\(\s*[\"'](md5|sha1)[\"']|MessageDigest\.getInstance\(\s*\"(MD5|SHA-?1)\"|md5\.New\(|sha1\.New\()",
         ALL,
-        "Use SHA-256+ for integrity and bcrypt/argon2/scrypt for passwords.",
+        "Fine for non-security fingerprints/cache keys; for integrity use SHA-256+, for passwords bcrypt/argon2/scrypt.",
         0.7,
     ),
     _r(
@@ -279,6 +279,9 @@ RULES: list[Rule] = [
     ),
 ]
 
+_REGEX_LINE = re.compile(
+    r"re\.compile\(|new RegExp\(|Pattern\.compile\(|regexp\.(Must)?Compile\(|(?<!\w)r[\"'][^\"']*\\[bsdw]"
+)
 _AUTH_HINT = re.compile(
     r"(?i)auth|login|jwt|token|current_user|permission|require_?role|protected|guard|session|api_?key|bearer"
 )
@@ -304,6 +307,8 @@ class SecurityAnalyzer(Analyzer):
                 for i, line in enumerate(lines, start=1):
                     if len(line) > 600 or not rule.pattern.search(line):
                         continue
+                    if rule.category != "secrets" and _REGEX_LINE.search(line):
+                        continue  # a rule/regex definition mentioning the pattern is not a use of it
                     if rule.id == "SEC-GENERIC-SECRET" and re.search(
                         r"(?i)(example|placeholder|changeme|your[_-]?|xxx|<|>|\$\{|os\.environ|process\.env|getenv)",
                         line,

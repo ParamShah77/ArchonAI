@@ -35,6 +35,19 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    if settings.archon_api_key:
+        from starlette.requests import Request
+        from starlette.responses import JSONResponse
+
+        @app.middleware("http")
+        async def require_api_key(request: Request, call_next):  # type: ignore[no-untyped-def]
+            open_paths = ("/health", "/docs", "/openapi.json", "/redoc")
+            if request.method == "OPTIONS" or request.url.path.startswith(open_paths):
+                return await call_next(request)
+            if request.headers.get("x-api-key") != settings.archon_api_key:
+                return JSONResponse({"detail": "invalid or missing X-API-Key"}, status_code=401)
+            return await call_next(request)
+
     app.include_router(repos.router)
     app.include_router(graph.router)
     app.include_router(analysis.router)

@@ -15,9 +15,15 @@ _LOOP = {
 }
 _BRANCH = re.compile(r"^\s*(if|elif|else|for|while|try|except|catch|switch|case|with)\b")
 _QUERY_CALL = re.compile(
-    r"(?i)\b(execute|executemany|fetch(all|one|many)?|query|find(One|Many|ById|All)?|filter|select|get_or_create|"
-    r"first|all|count|save|create|update|delete|insert|aggregate|findOne|findMany|findUnique|upsert)\s*\(|"
-    r"\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE FROM\b"
+    # SQL statements inside strings
+    r"(?i)\b(SELECT\s+[\w*,.\s]+\s+FROM\s+\w|INSERT\s+INTO\s+\w|UPDATE\s+\w+\s+SET\b|DELETE\s+FROM\s+\w)|"
+    # unambiguous data-access method names
+    r"\b(execute|executemany|fetchall|fetchone|fetchmany|findOne|findMany|findUnique|findById|find_one|find_all|"
+    r"aggregate|upsert|get_or_create|select_related|prefetch_related|bulk_create|bulk_update|scalars?)\s*\(|"
+    # generic verbs only when called on something that looks like a data-access object
+    r"\b(db|session|cursor|conn|connection|repo|repository|prisma|knex|orm|objects|collection|pool|tx|trx|store|"
+    r"queryset|qs|dao|mapper|client|Model|models)\.\w*(get|filter|all|first|count|save|create|update|delete|insert|"
+    r"find|query|exec|scan|put|batch)\w*\s*\("
 )
 _HTTP_CALL = re.compile(
     r"\b(requests\.(get|post|put|delete|patch)|httpx\.(get|post)|urlopen|fetch|axios\.\w+|http\.Get|http\.Post)\s*\("
