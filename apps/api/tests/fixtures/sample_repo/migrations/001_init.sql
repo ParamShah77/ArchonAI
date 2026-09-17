@@ -1,0 +1,8 @@
+CREATE TABLE users (
+  id INTEGER PRIMARY KEY,
+  email VARCHAR(255) NOT NULL
+);
+CREATE TABLE orders (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id)
+);

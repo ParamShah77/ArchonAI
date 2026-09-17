@@ -1,0 +1,22 @@
+# Optional infrastructure. ARCHON runs on SQLite by default; start this only
+# when you want Postgres + pgvector (larger repos, concurrent users).
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: archon-postgres
+    environment:
+      POSTGRES_USER: archon
+      POSTGRES_PASSWORD: archon
+      POSTGRES_DB: archon
+    ports:
+      - "5432:5432"
+    volumes:
+      - archon_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U archon"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  archon_pgdata:

@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+npm-debug.log*
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Runtime data
+data/
+workspace/
+*.db
+*.db-journal
+
+# Quiz gate marker (session-local, never committed)
+.archon/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

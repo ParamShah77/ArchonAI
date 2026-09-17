@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0b0d12;
+  --bg-elev: #12151c;
+  --bg-elev-2: #181c25;
+  --border: #232937;
+  --border-strong: #303748;
+  --fg: #e6e9ef;
+  --fg-muted: #9aa3b5;
+  --fg-faint: #6b7385;
+  --accent: #5aa9ff;
+  --accent-soft: rgba(90, 169, 255, 0.14);
+  --ok: #7ee0a0;
+  --warn: #ffb86c;
+  --danger: #ff7b9c;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-elev: var(--bg-elev);
+  --color-elev2: var(--bg-elev-2);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--fg-muted);
+  --color-faint: var(--fg-faint);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 8px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.card {
+  @apply bg-elev border border-line rounded-lg;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.kbd {
+  @apply font-mono text-[11px] px-1.5 py-0.5 rounded border border-line-strong bg-elev2 text-muted;
+}
+
+.btn {
+  @apply inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium border border-line-strong bg-elev2 text-fg hover:border-accent hover:text-accent transition-colors disabled:opacity-50 disabled:pointer-events-none;
+}
+.btn-primary {
+  @apply bg-accent text-[#08111f] border-accent hover:bg-[#7bbaff] hover:text-[#08111f];
+}
+.btn-ghost {
+  @apply bg-transparent border-transparent text-muted hover:bg-elev2 hover:text-fg;
+}
+
+.input {
+  @apply w-full rounded-md border border-line-strong bg-bg px-3 py-2 text-sm text-fg placeholder:text-faint focus:outline-none focus:border-accent;
+}
+
+.chip {
+  @apply inline-flex items-center gap-1 rounded-full border border-line-strong bg-elev2 px-2 py-0.5 text-xs text-muted;
+}
+
+.stat-label {
+  @apply text-[11px] uppercase tracking-wider text-faint;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.pulse {
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
