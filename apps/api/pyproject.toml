@@ -38,6 +38,14 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# Rule tables, prompts and finding texts are long literal strings; wrapping them hurts readability.
+"archon/analysis/*.py" = ["E501"]
+"archon/services/reasoning.py" = ["E501"]
+"archon/services/docs.py" = ["E501"]
+"archon/services/stacktrace.py" = ["E501"]
+"tests/*.py" = ["E501"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

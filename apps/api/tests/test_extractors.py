@@ -9,7 +9,7 @@ def _kinds(fx, kind):
 
 
 def test_python_extracts_symbols_routes_and_tables():
-    src = b'''
+    src = b"""
 from fastapi import APIRouter
 from .db import get_session
 
@@ -28,7 +28,7 @@ async def read_item(id: int):
 
 def helper(x):
     return x
-'''
+"""
     fx = extract_file("app/items.py", "python", src)
     assert {n.name for n in _kinds(fx, NodeKind.CLASS)} == {"Base", "Item"}
     assert {n.name for n in _kinds(fx, NodeKind.FUNCTION)} == {"read_item", "helper"}

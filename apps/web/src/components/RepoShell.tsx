@@ -19,6 +19,11 @@ export function useRepo() {
 const TABS = [
   { href: "", label: "Overview" },
   { href: "/map", label: "Code Map" },
+  { href: "/chat", label: "Chat" },
+  { href: "/audit", label: "Audit" },
+  { href: "/intel", label: "Intel" },
+  { href: "/docs", label: "Docs" },
+  { href: "/tools", label: "Tools" },
 ];
 
 export function RepoShell({ id, children }: { id: string; children: ReactNode }) {

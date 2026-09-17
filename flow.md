@@ -87,6 +87,62 @@ apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /
 Data hook: `src/lib/hooks.ts::useApi(key, fetcher, {pollMs, pollWhile})` — refetches when `key` changes;
 `loading` is true only until the first result for the current key arrives.
 
+### 3.5 Codebase chat (Phase 2)
+```
+POST /repos/{id}/chat {question, conversation_id?}
+  → routes/intelligence.chat → services/chat.ask
+      1. load conversation (or create) + last 8 messages as history
+      2. build_context: context/index.retrieve(query)  (BM25 ⊕ embeddings, RRF)  → chunks
+                        graph_facts(nodes mentioned in question + chunk nodes) → relationship sentences
+      3. llm.complete(system=SYSTEM, history, prompt=context+question)   (skipped if no provider)
+      4. persist user + assistant messages (sources JSON on the assistant row)
+  → {conversation_id, answer, sources[]}
+Retrieval index: services/ingest.ingest_repository → context/index.index_repository (after graph save)
+  chunker.build_chunks(ctx) → CodeChunk rows (+embedding when available) → retrieval_cache.invalidate
+  POST /repos/{id}/index rebuilds on demand (?embeddings=true|false)
+```
+
+### 3.6 Analysis (Phase 3)
+```
+POST /repos/{id}/analyze {analyzers?}      → AnalysisRun row (pending) → BackgroundTasks(run_analysis_job)
+  run_analysis_job(run_id)
+    → run_analyzers(): for each name in ANALYZERS: analyzer.run(AnalysisContext) → list[Finding]
+                       save_findings(): replace open findings for that analyzer, keep resolved/dismissed by fingerprint
+    → compute_and_store_health(): findings + tests report → health.compute_health → HealthSnapshot row
+    → run.status = done | failed
+GET /repos/{id}/findings?analyzer&severity&status&path   PATCH /findings/{id} {status}
+GET /repos/{id}/health-score?recompute   GET /api-intel   GET /db-intel   GET /dependencies   GET /tests-intel
+Analyzers: security (regex rules + endpoint auth rule), performance (codeshape.analyze_body per function),
+debt (function/class/file rules, dead code, duplication windows, import cycles), dependency (report → findings),
+api (duplicate routes, verbs, GET mutations, versioning), database (orphans, PK, bulk writes), tests (coverage gaps).
+```
+
+### 3.7 Documentation (Phase 2)
+```
+POST /repos/{id}/docs/generate {kinds?} → services/docs.generate
+  per kind: gen_<kind>(ctx) builds Markdown from graph/report facts, then _narrate() asks the LLM for a
+  narrative section (skipped without a provider) → Document rows (replace per kind)
+GET /repos/{id}/docs   GET /repos/{id}/docs/{doc_id}
+```
+
+### 3.8 Reasoning workflows (Phase 4) — services/reasoning.py
+```
+POST /debug {error, description}   stacktrace.parse → resolve_frames (frames → nodes) → excerpts + graph_facts
+                                   + retrieve(error text) → LLM JSON {hypotheses, root_cause, fix, verification}
+POST /impact {node_id|path|symbol, depth, change, ai}
+                                   impact.resolve_target → analyze_impact (reverse reachability over
+                                   calls/imports/extends/queries; endpoints via exposes; tests via imports; risk score)
+                                   → optional LLM JSON {will_break, safe_if, tests_to_run, migration_steps}
+POST /feature?mode=simulate|plan  retrieve(description) → component hits → LLM JSON plan
+POST /plan                         same as feature with mode=plan
+POST /advise {question}            reconstruct() + open findings + retrieve → LLM JSON {recommendations, alternatives}
+POST /refactor {node_id?|path?}    debt findings → hottest file (or longest function) → impact → LLM JSON {proposals}
+POST /tests/generate {node_id}     source + callees/callers + heuristic cases → LLM JSON {code, cases}
+POST /review {diff, title}         parse_diff → changed symbols → analyze_impact per symbol + security rules on
+                                   added lines → LLM JSON {verdict, findings, side_effects, missing_tests}
+POST /logs {logs, description}     analyze_logs (levels, templates, timeline, bursts, code refs) → LLM JSON {timeline, root_cause}
+```
+
 ## 4. Background work
 Ingestion runs via FastAPI `BackgroundTasks` in-process (Phase 1). Phase 5 moves it to a Redis-backed queue.
 
@@ -104,6 +160,17 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-09-17/18 — Phases 2–4 backend (analysis, chat, docs, reasoning)
+- Owner disabled the quiz gate (D-011): `CLAUDE.md` Rule 3 marked disabled, hook removed from `.claude/settings.json`.
+- `db/models.py`: added `AnalysisRun`, `FindingRow`, `CodeChunk`, `Document`, `HealthSnapshot`, `Conversation`, `ChatMessage`.
+- `analysis/`: `findings.py` (Finding, severity weights, D-012), `base.py` (Analyzer, AnalysisContext, tokenizer, test-path detection), `codeshape.py` (per-function structural facts), `security.py`, `performance.py`, `debt.py`, `dependency.py`, `api_intel.py`, `db_intel.py`, `tests_intel.py`, `health.py`, `runner.py`.
+- `context/`: `chunker.py`, `index.py` (BM25, RRF fusion, retrieval cache, `index_repository`, `graph_facts`) (D-013).
+- `llm/mock.py` + registry: deterministic provider (D-014).
+- `services/chat.py`, `services/docs.py`, `services/stacktrace.py`, `services/impact.py`, `services/reasoning.py` (D-015).
+- `api/routes/analysis.py`, `api/routes/intelligence.py`; `main.py` includes them; `services/ingest.py` builds the retrieval index after ingestion.
+- `tests/test_intelligence.py`: unit tests (codeshape, stack traces, diff, logs) + one end-to-end flow through every new endpoint with the mock provider.
+- `pyproject.toml`: E501 ignored for rule/prompt-heavy modules.
 
 ### Session 2026-09-08 — Project bootstrap (Phase 0 → Phase 1)
 **Phase 0 (foundation)**

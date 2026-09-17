@@ -12,6 +12,8 @@ from typing import Any
 
 from sqlalchemy import select
 
+from archon.analysis.base import AnalysisContext
+from archon.context.index import index_repository
 from archon.db.models import Repository
 from archon.db.session import session_factory
 from archon.graph.builder import BuiltGraph, build_repo_graph
@@ -123,6 +125,15 @@ async def ingest_repository(repo_id: str) -> None:
             repo.status = "ready"
         await session.commit()
     graph_cache.invalidate(repo_id)
+    # Build the retrieval index right away so chat/docs work without a separate step (embeddings best-effort).
+    try:
+        async with Session() as session:
+            repo = await session.get(Repository, repo_id)
+            if repo is not None:
+                rg = await graph_cache.get(session, repo_id)
+                await index_repository(session, AnalysisContext(repo, rg))
+    except Exception:  # noqa: BLE001
+        log.exception("retrieval indexing failed for %s (chat will still work after POST /index)", repo_id)
     log.info(
         "ingested %s: %s nodes, %s edges in %.1fs",
         repo_id,

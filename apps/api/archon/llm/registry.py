@@ -17,6 +17,10 @@ def get_provider(name: str | None = None) -> LLMProvider:
         from archon.llm.gemini import GeminiProvider
 
         return GeminiProvider(s.gemini_api_key, s.gemini_model, s.gemini_embed_model)
+    if name == "mock":
+        from archon.llm.mock import MockProvider
+
+        return MockProvider()
     if name in ("groq", "xai"):
         from archon.llm.openai_compat import OpenAICompatProvider
 
@@ -36,6 +40,8 @@ def llm_available() -> bool:
 
 def embed_available() -> bool:
     s = get_settings()
+    if s.archon_embed_provider == "mock" or s.archon_llm_provider == "mock":
+        return True
     return s.archon_embed_provider == "gemini" and bool(s.gemini_api_key)
 
 
@@ -73,6 +79,8 @@ async def complete_json(prompt: str, *, system: str = "", temperature: float = 0
 
 async def embed(texts: list[str]) -> list[list[float]]:
     s = get_settings()
+    if s.archon_embed_provider == "mock" or s.archon_llm_provider == "mock":
+        return await get_provider("mock").embed(texts)
     if s.archon_embed_provider == "gemini":
         return await get_provider("gemini").embed(texts)
     raise LLMError(f"embedding provider not available: {s.archon_embed_provider}")

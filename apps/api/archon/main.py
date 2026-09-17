@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from archon import __version__
-from archon.api.routes import graph, repos
+from archon.api.routes import analysis, graph, intelligence, repos
 from archon.api.schemas import HealthOut
 from archon.config import get_settings
 from archon.db.session import dispose_db, get_engine, init_db
@@ -37,6 +37,8 @@ def create_app() -> FastAPI:
     )
     app.include_router(repos.router)
     app.include_router(graph.router)
+    app.include_router(analysis.router)
+    app.include_router(intelligence.router)
 
     @app.get("/health", response_model=HealthOut, tags=["meta"])
     async def health() -> HealthOut:

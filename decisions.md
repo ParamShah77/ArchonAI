@@ -141,3 +141,39 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
 - **Alternatives considered:** Keep the hook but auto-pass (misleading audit trail); delete the script (loses the option to re-enable).
 - **Why this one:** Honors the owner's instruction while keeping the mechanism one line away.
 - **Consequences:** No forced knowledge check before commits; the session changelog in `flow.md` becomes the primary review aid.
+
+## D-012 — One shared `Finding` model for every analyzer
+- **Date:** 2026-09-18
+- **Status:** Accepted
+- **Context:** Seven analyzers (security, performance, debt, dependency, api, database, tests) plus AI code review all produce "problems". The health score, the findings UI, and the advisor need to consume them uniformly.
+- **Decision:** `archon.analysis.findings.Finding` (analyzer, category, severity, title, description, path, lines, node_id, evidence, recommendation, confidence, tags) with a content-based `fingerprint` (analyzer + category + path + node/title + evidence prefix, deliberately *not* the line number). Persisted in one `findings` table; a re-run replaces an analyzer's open findings but preserves `resolved`/`dismissed` status by fingerprint.
+- **Alternatives considered:** One table per analyzer (simpler queries per feature, but N copies of the UI and score logic); SARIF (industry standard, but heavier than needed and awkward for non-security findings).
+- **Why this one:** One list, one filter UI, one scoring function; the fingerprint survives line drift so triage decisions stick across runs.
+- **Consequences:** Analyzer-specific detail must fit `evidence`/`tags`; rich reports (API inventory, DB schema, dependency inventory) are separate report endpoints, not findings.
+
+## D-013 — Hybrid retrieval: BM25 always, embeddings when available, fused by reciprocal rank
+- **Date:** 2026-09-18
+- **Status:** Accepted
+- **Context:** Chat, docs, debugging, planning and review all need "the most relevant code for this text". Free-tier embedding APIs are rate-limited and may be absent entirely.
+- **Decision:** Chunks are graph-derived (one per class/function/method, plus windows over symbol-less regions). A pure-Python BM25 over identifier-split tokens is built per repo in memory (cached). If an embedding provider is configured, chunks are embedded at index time (best effort, failures ignored) and query results are fused with BM25 via reciprocal rank fusion (1/(60+rank)). Vectors are stored as JSON in SQLite; pgvector remains a later optimisation.
+- **Alternatives considered:** Embeddings-only (best semantic recall, but unusable without a key); an external vector DB (Chroma/Qdrant: another service); `rank-bm25`/`sentence-transformers` packages (fine, but ~40 lines cover BM25 and local embedding models are slow on laptops).
+- **Why this one:** Works offline with zero keys, upgrades transparently, and the graph-derived chunking means every hit maps to a node (so answers can cite and the map can highlight).
+- **Consequences:** Cosine over JSON vectors is O(n) per query — fine to ~50k chunks. Embedding the whole repo on a free tier can hit rate limits; the loop batches 100 and simply logs failures.
+
+## D-014 — A deterministic `mock` LLM provider for tests and offline demos
+- **Date:** 2026-09-18
+- **Status:** Accepted
+- **Context:** All AI workflows must be tested in CI without network or keys, and demoed offline.
+- **Decision:** `ARCHON_LLM_PROVIDER=mock` selects `MockProvider`: JSON-mode calls return a superset object satisfying every prompt schema (`mock: true`), text calls echo a digest, embeddings are SHA-256-derived vectors. Integration tests run the entire analyze → chat → docs → debug/impact/feature/plan/advise/refactor/tests/review/logs flow against it.
+- **Alternatives considered:** Monkeypatching provider calls per test (brittle, repeats setup); recorded HTTP cassettes (couple tests to vendor payloads).
+- **Why this one:** One env var flips the whole system; tests exercise real prompt construction and response handling.
+- **Consequences:** Mock answers are meaningless; tests assert structure and the deterministic (non-LLM) facts, never AI content.
+
+## D-015 — Reasoning workflows return structural facts even without an LLM
+- **Date:** 2026-09-18
+- **Status:** Accepted
+- **Context:** Debugging, impact, feature simulation, planning, advice, refactoring, test generation, review and log intelligence are "AI features", but the owner may run without a key.
+- **Decision:** Every workflow computes a deterministic part from the graph first (parsed stack frames mapped to nodes, reverse-reachability impact with a risk score, diff→symbol mapping + rule checks, log clustering/timeline, heuristic test cases, hot-spot selection) and returns it as `facts`; the LLM part is `ai` with `ai_error` explaining absence/failure. The frontend renders both.
+- **Alternatives considered:** Refuse without a key (simplest, but leaves most of ARCHON dark); fake narratives (misleading).
+- **Why this one:** The structural half is often the more trustworthy half, and it makes the AI half auditable.
+- **Consequences:** Prompts carry the facts explicitly, which keeps hallucination low but increases prompt size; budgets are capped per workflow.
