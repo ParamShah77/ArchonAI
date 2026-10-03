@@ -169,9 +169,11 @@ index_repository(session, ctx)            [per-repo asyncio.Lock]
   4. missing = rows without vector
        missing ≤ ARCHON_EMBED_RPM → embedder.embed_batch() inline
        else → embedder.start(repo_id): background task
-              loop: embed_batch(≤100) [read → end_read → embed → UPDATE → commit → invalidate cache]
-                    sleep to stay under RPM; on error sleep provider retry delay; stop after 5 failures
+              loop: embed_batch(≤ texts/min, ≤ tokens/min ÷ 2) [read → end_read → embed → UPDATE → commit → invalidate cache]
+                    sleep max(60·n/texts_per_min, 60·tokens/tokens_per_min)  (D-021)
+                    on 429: both rates × 0.75, sleep provider retry delay or 60 s; stop after 5 consecutive failures
 GET /repos/{id}/index/status → {pending, running, total, embedded, last_error}
+API startup (main.lifespan) → embedder.resume_all(): restart jobs for repos that still have chunks without vectors
 ```
 
 ## 4. Background work
@@ -199,12 +201,13 @@ Bash tool call in Claude Code
 - `llm/chain.py` (new): `FallbackChain` with per-attempt timeout, cooldowns from provider hints, `last_answered_by` context var, `status()`.
 - `llm/registry.py`: `get_chain()`, `chain_specs()`, `reset()`, `llm_status()`; links without keys skipped. `config.py`: `archon_llm_fallbacks`, `archon_llm_timeout`, `gemini_thinking_level`, `groq_tpm_limit`, `archon_embed_rpm`; new default models.
 - `db/session.py`: 30 s SQLite busy timeout, `end_read()`. `db/models.py`: `CodeChunk.embedding` stores SQL NULL.
-- `context/index.py`: `index_repository` reuses vectors by text hash, writes first, inline-or-background embedding, per-repo lock. `context/embedder.py` (new): paced background job + progress. `GET /repos/{id}/index/status`.
+- `context/index.py`: `index_repository` reuses vectors by text hash, writes first, inline-or-background embedding, per-repo lock. `context/embedder.py` (new): paced background job + progress; `resume_all()` restarts unfinished jobs at API startup. `GET /repos/{id}/index/status`.
 - `services/chat.py`: reads → `end_read` → LLM → writes; returns `answered_by`. `services/architecture.py`, `services/docs.py`: `end_read` before LLM calls. `services/reasoning.py`: every result has `ai_model`.
 - `main.py` + `schemas.HealthOut`: `/health` returns `llm_chain` and `embeddings`.
 - Web: `lib/api.ts` types; header chip lists the chain; chat replies, tool results and the architecture card show which model answered.
 - Tests: `tests/test_llm_chain.py` (new, 7 tests) and an embedding reuse/background test; 35 total, all offline.
 - `.env` (owner's, not committed): provider/model/fallback lines updated, keys untouched. `.env.example` documents the chain.
+- Embedding pacing refined (D-021): token-based batch sizing (measured 3.30 chars/token), adaptive 25% slowdown on 429, `resume_all()` at startup; `ARCHON_EMBED_TPM`.
 - Verified live: all 13 AI endpoints return 200 with AI output on this repository; forced-failure handover works; a chat answer in the UI shows its model.
 
 ### Session 2026-09-18 — Phase 4 frontend + Phase 5 hardening

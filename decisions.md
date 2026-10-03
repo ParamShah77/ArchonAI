@@ -240,3 +240,12 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
 - **Alternatives considered:** Shrink every prompt to fit 8k tokens (keeps Groq for everything, but cuts the code context that makes answers grounded); paid tier (rejected by the owner); round-robin across links (spreads quota but gives inconsistent quality for small prompts that Groq handles best).
 - **Why this one:** Small prompts get the fastest strong model; large prompts go straight to Gemini's long context without wasting a request; quota errors become cooldowns sized by the provider itself.
 - **Consequences:** Under load, many large-context answers come from Gemini Flash-Lite. Measured quality on this repository was good (correct impact analysis, caught the planted SQL injection), but it is the weakest link. Limit learning is per process and resets on restart.
+
+## D-021 — Embedding pacer budgets tokens as well as texts, and backs off adaptively
+- **Date:** 2026-10-03
+- **Status:** Accepted (refines D-019)
+- **Context:** After D-019 the background job still received 429s from Gemini. Measurements: a batch of 90 real chunks (~120k characters, ~36k tokens at a measured 3.30 chars/token) is refused while 20 chunks pass, and the error carries no quota metric — so besides the published 100 texts/minute there is an unpublished tokens-per-minute ceiling. A fixed token budget of 24k/min still drew occasional 429s.
+- **Decision:** Each batch is limited by count (≤ texts/min, ≤ 100) and by estimated tokens (≤ half a minute's token budget, chars/3.4); after each batch the job sleeps for whichever of the two limits is tighter. On every 429 it lowers both rates by 25% (floors 10 texts / 2,000 tokens per minute) for the rest of the job. Defaults `ARCHON_EMBED_RPM=90`, `ARCHON_EMBED_TPM=20000`. Inline embedding during `/index` happens only when the missing chunks fit both budgets. The current rate is reported in `/index/status`. Unfinished jobs restart at API startup.
+- **Alternatives considered:** Hard-code a lower constant (would be wrong for paid tiers or quota changes); exponential backoff only (keeps hitting the same ceiling every minute); local embedding model (no quota, but slow on a laptop and a large new dependency).
+- **Why this one:** Converges on whatever the account actually allows without configuration, and still runs at full speed on accounts with higher limits.
+- **Consequences:** A fresh 700-chunk repository takes roughly 15–25 minutes to embed fully on the free tier; keyword retrieval works throughout.

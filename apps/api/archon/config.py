@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     archon_llm_timeout: float = 60.0  # seconds per attempt before moving to the next link
     archon_embed_provider: str = "gemini"
     archon_embed_rpm: int = 90  # texts embedded per minute (Gemini free tier: 100)
+    archon_embed_tpm: int = 20000  # estimated tokens/min; the job lowers it by 25% on every 429 (D-019)
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.8-flash"
     gemini_embed_model: str = "gemini-embedding-001"

@@ -21,6 +21,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_db()
+    from archon.context import embedder
+
+    resumed = await embedder.resume_all()  # finish embedding jobs interrupted by a restart (D-019)
+    if resumed:
+        logging.getLogger("archon").info("resumed embedding for %s repo(s)", len(resumed))
     yield
     await dispose_db()
 

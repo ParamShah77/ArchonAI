@@ -155,9 +155,11 @@ async def index_repository(
     embedded_now = 0
     background = False
     if missing and not embedder.is_running(ctx.repo.id):
-        if missing <= get_settings().archon_embed_rpm:
+        cfg = get_settings()
+        missing_tokens = sum(embedder.est_tokens(r.text) for r in rows if r.embedding is None)
+        if missing <= cfg.archon_embed_rpm and missing_tokens <= cfg.archon_embed_tpm // 2:
             try:
-                embedded_now = await embedder.embed_batch(ctx.repo.id, missing)
+                embedded_now, _ = await embedder.embed_batch(ctx.repo.id, missing)
             except (LLMError, Exception) as e:  # noqa: BLE001 - retrieval still works via BM25
                 log.warning("inline embedding failed, scheduling background job: %s", e)
                 background = embedder.start(ctx.repo.id)
