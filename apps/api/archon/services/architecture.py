@@ -10,9 +10,11 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from archon.db.models import ArchitectureReport, Repository
+from archon.db.session import end_read
 from archon.graph.model import EdgeKind, NodeKind
 from archon.graph.query import RepoGraph
 from archon.llm import LLMError, complete_json, llm_available
+from archon.llm.chain import last_answered_by
 
 log = logging.getLogger("archon.architecture")
 
@@ -172,14 +174,17 @@ async def reconstruct(session: AsyncSession, repo: Repository, rg: RepoGraph, re
     if cached is not None and not refresh and cached.report.get("ai") is not None:
         return cached.report
     report = heuristic_report(repo, rg)
+    await end_read(session)  # do not hold a read snapshot across the LLM call (D-019)
     if llm_available():
         try:
             report["ai"] = await complete_json(_prompt(report), system=SYSTEM_PROMPT, max_tokens=4096)
+            report["ai_model"] = last_answered_by.get() or None
         except (LLMError, Exception) as e:  # noqa: BLE001 - keep heuristic output usable
             log.warning("architecture LLM step failed: %s", e)
             report["ai_error"] = f"{type(e).__name__}: {e}"
     else:
         report["ai_error"] = "No LLM provider configured (set GEMINI_API_KEY, GROQ_API_KEY or XAI_API_KEY)."
+    cached = await session.get(ArchitectureReport, repo.id)
     if cached is None:
         session.add(ArchitectureReport(repo_id=repo.id, report=report))
     else:

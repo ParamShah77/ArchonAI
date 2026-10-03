@@ -18,14 +18,21 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # LLM
-    archon_llm_provider: str = "gemini"
+    # LLM (decisions.md D-004, D-018). Completions go through a fallback chain:
+    # ARCHON_LLM_PROVIDER first, then ARCHON_LLM_FALLBACKS ("provider" or "provider:model", comma-separated).
+    # Links whose API key is missing are skipped.
+    archon_llm_provider: str = "groq"
+    archon_llm_fallbacks: str = "groq:qwen/qwen3.8-27b,gemini,gemini:gemini-3.5-flash-lite"
+    archon_llm_timeout: float = 60.0  # seconds per attempt before moving to the next link
     archon_embed_provider: str = "gemini"
+    archon_embed_rpm: int = 90  # texts embedded per minute (Gemini free tier: 100)
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.8-flash"
     gemini_embed_model: str = "gemini-embedding-001"
+    gemini_thinking_level: str = "low"  # low | medium | high | off
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_tpm_limit: int = 8000  # free tier tokens/minute per model; prompts that cannot fit skip Groq
     xai_api_key: str = ""
     xai_model: str = "grok-3-mini"
 

@@ -17,7 +17,9 @@ def get_engine():
     global _engine, _session_factory
     if _engine is None:
         url = get_settings().resolved_database_url
-        _engine = create_async_engine(url, echo=False, future=True)
+        # SQLite: wait up to 30 s for a competing writer instead of failing immediately (decisions.md D-019).
+        connect_args = {"timeout": 30} if url.startswith("sqlite") else {}
+        _engine = create_async_engine(url, echo=False, future=True, connect_args=connect_args)
         _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     return _engine
 
@@ -49,3 +51,16 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency."""
     async with session_factory()() as session:
         yield session
+
+
+async def end_read(session: AsyncSession) -> None:
+    """Close the session's current transaction before a slow await (LLM call, embeddings).
+
+    With SQLite WAL, a transaction that has read keeps its snapshot; if anyone else commits while we
+    wait on the network, upgrading that transaction to a write fails with "database is locked"
+    (SQLITE_BUSY_SNAPSHOT) and the busy timeout does not help. Committing here ends the snapshot.
+    Call it only when nothing is pending, so it never commits half-done work (decisions.md D-019).
+    """
+    if session.new or session.dirty or session.deleted:
+        raise RuntimeError("end_read() called with pending changes")
+    await session.commit()

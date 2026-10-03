@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from archon.analysis import api_intel, db_intel, dependency
 from archon.analysis.base import AnalysisContext
 from archon.db.models import Document, Repository
+from archon.db.session import end_read
 from archon.graph.model import EdgeKind, NodeKind
 from archon.llm import LLMError, complete, llm_available
 from archon.services.architecture import heuristic_report
@@ -349,6 +350,7 @@ async def gen_onboarding(ctx: AnalysisContext) -> tuple[str, bool]:
 
 
 async def generate(session: AsyncSession, repo: Repository, ctx: AnalysisContext, kinds: list[str]) -> list[Document]:
+    await end_read(session)  # generation makes LLM calls; write only at the end (D-019)
     docs: list[Document] = []
     for kind in kinds:
         if kind == "modules":

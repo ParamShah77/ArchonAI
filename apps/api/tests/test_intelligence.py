@@ -19,10 +19,10 @@ from archon.services.reasoning import analyze_logs, parse_diff
 async def client():
     os.environ["ARCHON_LLM_PROVIDER"] = "mock"
     from archon.config import get_settings
-    from archon.llm.registry import get_provider
+    from archon.llm.registry import reset as reset_llm
 
     get_settings.cache_clear()
-    get_provider.cache_clear()
+    reset_llm()
     from archon.main import create_app
 
     app = create_app()
@@ -31,7 +31,7 @@ async def client():
             yield c
     os.environ["ARCHON_LLM_PROVIDER"] = "gemini"
     get_settings.cache_clear()
-    get_provider.cache_clear()
+    reset_llm()
 
 
 async def _ready_repo(client: AsyncClient, source: str) -> str:
@@ -224,3 +224,37 @@ async def test_full_intelligence_flow(client: AsyncClient, fixture_repo: Path):
         )
     ).json()
     assert lg["facts"]["code_refs"][0]["node"] == "place_order" and lg["ai"]
+
+
+async def test_reindex_reuses_vectors_and_background_job_embeds_the_rest(
+    client: AsyncClient, fixture_repo: Path, monkeypatch
+):
+    from archon.config import get_settings
+    from archon.context import embedder
+
+    rid = await _ready_repo(client, str(fixture_repo))
+    first = (await client.post(f"/repos/{rid}/index")).json()
+    assert first["pending"] == 0 and first["embedded"] == first["chunks"]
+    # unchanged code: every vector is reused, nothing is sent to the provider again
+    again = (await client.post(f"/repos/{rid}/index")).json()
+    assert again["reused"] == again["chunks"] and again["pending"] == 0
+
+    # more chunks than one minute of quota -> paced background job (sleeps skipped in the test)
+    monkeypatch.setenv("ARCHON_EMBED_RPM", "5")
+    get_settings.cache_clear()
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(embedder.asyncio, "sleep", lambda s: real_sleep(0))
+    try:
+        fresh = (await client.post(f"/repos/{rid}/index", params={"embeddings": "false"})).json()
+        assert fresh["embedded"] == 0
+        out = (await client.post(f"/repos/{rid}/index")).json()
+        assert out["background"] is True and out["pending"] == out["chunks"]
+        for _ in range(100):
+            st = (await client.get(f"/repos/{rid}/index/status")).json()
+            if not st["running"]:
+                break
+            await real_sleep(0.05)
+        assert st["pending"] == 0 and st["embedded"] == out["chunks"]
+    finally:
+        monkeypatch.delenv("ARCHON_EMBED_RPM")
+        get_settings.cache_clear()

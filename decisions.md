@@ -195,3 +195,48 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
 - **Alternatives considered:** arq/Celery + Redis (durable retries, horizontal workers; another service and more ops for a single-node tool); Postgres-backed queue (no new service, but still a worker process to run).
 - **Why this one:** Every current job finishes in seconds to a few minutes on one node; adding infrastructure now buys nothing the owner needs.
 - **Consequences:** A job dies with the process; no retries; CPU-heavy analysis shares the API process (mitigated by `asyncio.to_thread` for parsing).
+
+## D-018 — Fallback chain across free-tier providers; Groq primary, Gemini fallback and embeddings
+- **Date:** 2026-10-03
+- **Status:** Accepted (supersedes the "Gemini is the default" part of D-004; the provider interface from D-004 stands). Default chain order and timeout amended by D-020.
+- **Context:** The first run with real keys (owner added Gemini + Groq) showed: (1) both default models were retired for this account (`gemini-2.5-flash` → 404 "no longer available to new users", `llama-3.3-70b-versatile` → 404); (2) Gemini 3.x models think before answering and thinking tokens count against `max_output_tokens`, so a small cap produced `finish_reason=MAX_TOKENS` with empty text; (3) the Gemini free tier returned 503 "high demand" and several calls took 50–110 s; (4) Groq answered every call in 0.2–1.3 s with valid JSON (`openai/gpt-oss-120b`, `qwen/qwen3.8-27b`, `openai/gpt-oss-20b`). Measured on 2026-10-03 with a pong + structured-JSON benchmark.
+- **Decision:**
+  - Completions go through `archon.llm.chain.FallbackChain`: `ARCHON_LLM_PROVIDER` first, then `ARCHON_LLM_FALLBACKS` (`provider` or `provider:model`). Each attempt has a timeout (`ARCHON_LLM_TIMEOUT`, 90 s); any failure moves to the next link; a failed link cools down 60 s and is tried last. Links without an API key are skipped, so a single-key setup still works. The answering link is recorded per task and status is exposed in `/health` (`llm_chain`).
+  - Defaults: primary `groq:openai/gpt-oss-120b` (fast, 131k context, strongest reasoning of the available free models); fallbacks `gemini:gemini-3.5-flash-lite` (fastest reliable Gemini, ~1 s) then `gemini:gemini-3.8-flash` (the model Google recommends, but overloaded at times). Embeddings stay on `gemini-embedding-001` (Groq has no embeddings endpoint; verified working, 768 dims).
+  - Gemini provider: +2048 output tokens of thinking headroom, `thinking_level=low` (configurable, retried without it if a model rejects it), automatic function calling disabled, and an error that names the finish reason when no text comes back. Groq/xAI: +1024 headroom for reasoning models.
+  - Provider-level retries now cover only transient errors (429, 5xx, connection/timeout) with two attempts and short backoff; the old code retried 404s and waited up to 30 s ×4 before the caller learned anything. Embedding batches retry individually.
+- **Alternatives considered:**
+  - Keep Gemini primary, only fix model names: slowest and least available option on the measured day.
+  - Use the moving alias `gemini-flash-latest`: never retired, but it took 52 s on structured JSON in the benchmark and changes behaviour silently.
+  - LiteLLM router: has fallbacks built in, but a heavy dependency for ~100 lines (same reasoning as D-004).
+  - Parallel "race" of all providers: lowest latency, but burns free-tier quota on every call.
+- **Why this one:** Turns free-tier flakiness into a latency blip instead of a failed feature, keeps quota use to one provider per call in the normal case, and makes model retirement a config change rather than an outage.
+- **Consequences:** Answers in one session can come from different models (visible in `/health` and logs). Model names will keep aging; `.env` is the single place to update them. Chain state is per-process.
+
+## D-019 — SQLite concurrency: no read snapshot across slow awaits; paced background embeddings
+- **Date:** 2026-10-03
+- **Status:** Accepted
+- **Context:** With real providers, `POST /index` and `GET /architecture?refresh=true` returned 500 "database is locked". Two mechanisms: (1) indexing opened a write transaction (DELETE chunks) and then awaited Gemini embeddings for many seconds, so every other writer timed out; (2) SQLite WAL gives a reading transaction a snapshot, and if anyone commits while that transaction waits on an LLM, upgrading it to a write fails immediately with SQLITE_BUSY_SNAPSHOT — the busy timeout does not apply. Separately, the Gemini free tier allows 100 embedded texts per minute (each batch item counts), and this repository alone has ~730 chunks, so inline embedding hit 429 and silently stored no vectors.
+- **Decision:**
+  - `db.session.end_read(session)` ends the current transaction before any slow await; it refuses to run with pending changes. Chat, architecture reconstruction, docs generation and indexing follow "read → end_read → LLM/embed → write → commit".
+  - SQLite connections get a 30 s busy timeout. Indexing of one repo is serialized with a per-repo `asyncio.Lock`.
+  - `index_repository` writes chunks immediately, reuses vectors of chunks whose text hash is unchanged, embeds inline only when the missing count fits one minute of quota (`ARCHON_EMBED_RPM`, default 90), and otherwise starts a paced background job (`context/embedder.py`) that embeds batches, sleeps to stay under the rate, honours the provider's retry delay, and stops after 5 consecutive failures. `GET /repos/{id}/index/status` reports progress.
+  - Missing vectors are stored as SQL NULL (`JSON(none_as_null=True)`); queries also match the JSON text `null` written by earlier versions.
+- **Alternatives considered:** Postgres only (no snapshot-upgrade failure, but D-003 keeps SQLite as the zero-setup default); `BEGIN IMMEDIATE` for every transaction (would hold the single write lock across LLM calls, blocking everyone); a job queue for embeddings (D-017 defers queues; an in-process task with DB-visible progress is enough on one node); embedding fewer chunks (loses retrieval quality).
+- **Why this one:** Fixes the real failure modes without new infrastructure, makes indexing return in ~0.1 s, and makes re-indexing nearly free for unchanged code.
+- **Consequences:** On a fresh large repo, semantic retrieval improves gradually over several minutes (BM25 works from the start). The background job dies with the process; the next `/index` call resumes it because missing vectors are recomputed from the table.
+
+## D-020 — Budget-aware routing on Groq; learned limits; recovered JSON; answer attribution
+- **Date:** 2026-10-03
+- **Status:** Accepted (amends D-018 defaults)
+- **Context:** Measured Groq free-tier limits are 8,000 tokens/minute and 1,000 requests/day per model, counted as prompt + requested `max_tokens`. Many ARCHON prompts carry 15–26k characters of code (≈5–8k tokens), and Groq also enforces an output-tokens-per-minute cap that appears only in error text ("Request too large … (OTPM): Limit N"). `gpt-oss-120b` occasionally fails JSON mode server-side with 400 `json_validate_failed`. Gemini 3.8 Flash exhausted its free quota within a few calls.
+- **Decision:**
+  - The Groq provider estimates prompt tokens (chars/3.2) and sizes `max_tokens` to fit the minute budget; if the prompt alone cannot fit, it raises `PromptTooLarge` before any network call and the chain moves on without cooling the link down.
+  - Limits seen in "Request too large" errors (TPM or OTPM) are remembered per link and applied to later requests.
+  - On `json_validate_failed`, the provider returns Groq's `failed_generation` text; the tolerant JSON parser and the existing one-shot repair recover it.
+  - 429s are not retried in place; the chain cools the link down for the provider's own "try again in Ns" hint (capped), otherwise 60 s.
+  - Default chain: `groq:openai/gpt-oss-120b` → `groq:qwen/qwen3.8-27b` (separate per-model budget) → `gemini:gemini-3.8-flash` → `gemini:gemini-3.5-flash-lite`; per-attempt timeout 60 s.
+  - Every AI result carries `ai_model` (chat: `answered_by`); the UI shows it, and the header chip lists the chain with ok/failed counts.
+- **Alternatives considered:** Shrink every prompt to fit 8k tokens (keeps Groq for everything, but cuts the code context that makes answers grounded); paid tier (rejected by the owner); round-robin across links (spreads quota but gives inconsistent quality for small prompts that Groq handles best).
+- **Why this one:** Small prompts get the fastest strong model; large prompts go straight to Gemini's long context without wasting a request; quota errors become cooldowns sized by the provider itself.
+- **Consequences:** Under load, many large-context answers come from Gemini Flash-Lite. Measured quality on this repository was good (correct impact analysis, caught the planted SQL injection), but it is the weakest link. Limit learning is per process and resets on restart.

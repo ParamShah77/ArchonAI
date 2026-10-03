@@ -18,8 +18,10 @@ def _test_env(tmp_path_factory: pytest.TempPathFactory):
     os.environ["GROQ_API_KEY"] = ""
     os.environ["XAI_API_KEY"] = ""
     from archon.config import get_settings
+    from archon.llm.registry import reset as reset_llm
 
     get_settings.cache_clear()
+    reset_llm()
     yield
 
 

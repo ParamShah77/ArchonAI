@@ -106,4 +106,6 @@ class HealthOut(BaseModel):
     version: str
     llm_provider: str
     llm_configured: bool
+    llm_chain: list[dict[str, Any]] = []
+    embeddings: bool = False
     database: str

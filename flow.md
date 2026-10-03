@@ -144,8 +144,38 @@ POST /review {diff, title}         parse_diff → changed symbols → analyze_im
 POST /logs {logs, description}     analyze_logs (levels, templates, timeline, bursts, code refs) → LLM JSON {timeline, root_cause}
 ```
 
+### 3.9 LLM calls (D-018, D-020)
+```
+feature code → archon.llm.complete / complete_json
+  → registry.get_chain()  (cached; links = ARCHON_LLM_PROVIDER + ARCHON_LLM_FALLBACKS, minus links without keys)
+  → FallbackChain.complete(): order links (cooling-down links last)
+      for each link: asyncio.wait_for(link.complete(...), ARCHON_LLM_TIMEOUT)
+        Groq/xAI: _completion_budget() → PromptTooLarge (skip, no cooldown) | sized max_tokens
+                  → API call → 429: _learn_limit() → raise | 400 json_validate_failed → return failed_generation
+        Gemini:   thinking headroom + thinking_level → API call → no text → LLMError(finish_reason)
+      success → stats.ok, last_answered_by = "provider:model", return text
+      failure → stats.failed, cooldown (provider hint or 60 s), next link
+  → all failed → LLMError listing every link's reason
+complete_json: extract_json(text) → on failure one repair call through the same chain
+Embeddings: archon.llm.embed → Gemini directly (not the chain)
+```
+
+### 3.10 Retrieval index with paced embeddings (D-019)
+```
+index_repository(session, ctx)            [per-repo asyncio.Lock]
+  1. previous vectors by sha256(text) from existing chunks
+  2. build_chunks(ctx) → rows (reuse vector when text unchanged)
+  3. DELETE old chunks + INSERT rows → commit   (write lock held briefly)
+  4. missing = rows without vector
+       missing ≤ ARCHON_EMBED_RPM → embedder.embed_batch() inline
+       else → embedder.start(repo_id): background task
+              loop: embed_batch(≤100) [read → end_read → embed → UPDATE → commit → invalidate cache]
+                    sleep to stay under RPM; on error sleep provider retry delay; stop after 5 failures
+GET /repos/{id}/index/status → {pending, running, total, embedded, last_error}
+```
+
 ## 4. Background work
-Ingestion runs via FastAPI `BackgroundTasks` in-process (Phase 1). Phase 5 moves it to a Redis-backed queue.
+Ingestion and analysis run via FastAPI `BackgroundTasks` in-process; embedding runs as an `asyncio` task per repo (D-019). No external queue (D-017).
 
 ## 5. Process tooling
 ```
@@ -161,6 +191,21 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-03 — Real LLM keys: provider fixes and fallback chain
+- Owner added Gemini and Groq keys. Smoke tests showed both keys authenticate but the default models (`gemini-2.5-flash`, `llama-3.3-70b-versatile`) are retired for this account; Gemini 3.x returned empty text because thinking tokens consumed the output cap; Gemini free tier also returned 503 "high demand" and some calls took 50–110 s.
+- `llm/gemini.py`: thinking headroom (+2048 output tokens), `thinking_level` (default low, dropped automatically if a model rejects it), AFC disabled, error names the finish reason; retries only 5xx/429; `_embed_batch` retries only 5xx.
+- `llm/openai_compat.py`: `PromptTooLarge`, `estimate_tokens`, `_completion_budget` (TPM/OTPM-aware), `_learn_limit`, `_failed_generation` recovery; retries only 5xx/connection/timeout.
+- `llm/chain.py` (new): `FallbackChain` with per-attempt timeout, cooldowns from provider hints, `last_answered_by` context var, `status()`.
+- `llm/registry.py`: `get_chain()`, `chain_specs()`, `reset()`, `llm_status()`; links without keys skipped. `config.py`: `archon_llm_fallbacks`, `archon_llm_timeout`, `gemini_thinking_level`, `groq_tpm_limit`, `archon_embed_rpm`; new default models.
+- `db/session.py`: 30 s SQLite busy timeout, `end_read()`. `db/models.py`: `CodeChunk.embedding` stores SQL NULL.
+- `context/index.py`: `index_repository` reuses vectors by text hash, writes first, inline-or-background embedding, per-repo lock. `context/embedder.py` (new): paced background job + progress. `GET /repos/{id}/index/status`.
+- `services/chat.py`: reads → `end_read` → LLM → writes; returns `answered_by`. `services/architecture.py`, `services/docs.py`: `end_read` before LLM calls. `services/reasoning.py`: every result has `ai_model`.
+- `main.py` + `schemas.HealthOut`: `/health` returns `llm_chain` and `embeddings`.
+- Web: `lib/api.ts` types; header chip lists the chain; chat replies, tool results and the architecture card show which model answered.
+- Tests: `tests/test_llm_chain.py` (new, 7 tests) and an embedding reuse/background test; 35 total, all offline.
+- `.env` (owner's, not committed): provider/model/fallback lines updated, keys untouched. `.env.example` documents the chain.
+- Verified live: all 13 AI endpoints return 200 with AI output on this repository; forced-failure handover works; a chat answer in the UI shows its model.
 
 ### Session 2026-09-18 — Phase 4 frontend + Phase 5 hardening
 - `apps/web/src/lib/api.ts`: types + endpoints for findings, runs, health, intel reports, chat, docs, tools; optional `X-API-Key` header.

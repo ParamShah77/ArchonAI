@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 from collections import Counter, defaultdict
@@ -13,6 +14,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from archon.analysis.base import AnalysisContext, tokenize
+from archon.config import get_settings
 from archon.context.chunker import build_chunks
 from archon.db.models import CodeChunk
 from archon.graph.model import NodeKind
@@ -96,39 +98,80 @@ class RetrievalCache:
 retrieval_cache = RetrievalCache()
 
 
+_index_locks: dict[str, asyncio.Lock] = {}
+
+
+def _text_key(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 async def index_repository(
     session: AsyncSession, ctx: AnalysisContext, with_embeddings: bool | None = None
 ) -> dict[str, Any]:
-    """(Re)build chunks for a repo; embed them when a provider is available (best effort)."""
-    chunks = build_chunks(ctx)
-    await session.execute(delete(CodeChunk).where(CodeChunk.repo_id == ctx.repo.id))
-    rows = [
-        CodeChunk(
-            repo_id=ctx.repo.id,
-            node_id=c.node_id,
-            kind=c.kind,
-            name=c.name,
-            path=c.path,
-            start_line=c.start_line,
-            end_line=c.end_line,
-            text=c.text,
-        )
-        for c in chunks
-    ]
-    embedded = 0
-    use_embed = embed_available() if with_embeddings is None else with_embeddings
-    if use_embed and rows:
-        try:
-            vectors = await embed([r.text[:6000] for r in rows])
-            for r, v in zip(rows, vectors, strict=False):
-                r.embedding = v
-            embedded = len(vectors)
-        except (LLMError, Exception) as e:  # noqa: BLE001 - retrieval must still work via BM25
-            log.warning("embedding failed, continuing with BM25 only: %s", e)
-    session.add_all(rows)
-    await session.commit()
-    retrieval_cache.invalidate(ctx.repo.id)
-    return {"chunks": len(rows), "embedded": embedded}
+    """(Re)build chunks for a repo (decisions.md D-013, D-019).
+
+    Chunks are written immediately so keyword retrieval works at once. Vectors of chunks whose text is
+    unchanged are reused. Missing vectors are embedded inline when they fit one minute of the provider's
+    quota, otherwise by a paced background job (`archon.context.embedder`).
+    """
+    from archon.context import embedder
+
+    lock = _index_locks.setdefault(ctx.repo.id, asyncio.Lock())
+    async with lock:
+        previous = {
+            _text_key(text): vec
+            for text, vec in (
+                await session.execute(
+                    select(CodeChunk.text, CodeChunk.embedding).where(CodeChunk.repo_id == ctx.repo.id)
+                )
+            ).all()
+            if vec
+        }
+        use_embed = embed_available() if with_embeddings is None else with_embeddings
+        rows = []
+        reused = 0
+        for c in build_chunks(ctx):
+            vec = previous.get(_text_key(c.text)) if use_embed else None
+            reused += vec is not None
+            rows.append(
+                CodeChunk(
+                    repo_id=ctx.repo.id,
+                    node_id=c.node_id,
+                    kind=c.kind,
+                    name=c.name,
+                    path=c.path,
+                    start_line=c.start_line,
+                    end_line=c.end_line,
+                    text=c.text,
+                    embedding=vec,
+                )
+            )
+        await session.execute(delete(CodeChunk).where(CodeChunk.repo_id == ctx.repo.id))
+        session.add_all(rows)
+        await session.commit()
+        retrieval_cache.invalidate(ctx.repo.id)
+
+    missing = sum(1 for r in rows if r.embedding is None) if use_embed else 0
+    embedded_now = 0
+    background = False
+    if missing and not embedder.is_running(ctx.repo.id):
+        if missing <= get_settings().archon_embed_rpm:
+            try:
+                embedded_now = await embedder.embed_batch(ctx.repo.id, missing)
+            except (LLMError, Exception) as e:  # noqa: BLE001 - retrieval still works via BM25
+                log.warning("inline embedding failed, scheduling background job: %s", e)
+                background = embedder.start(ctx.repo.id)
+        else:
+            background = embedder.start(ctx.repo.id)
+    elif missing:
+        background = True
+    return {
+        "chunks": len(rows),
+        "embedded": reused + embedded_now,
+        "reused": reused,
+        "pending": max(0, missing - embedded_now),
+        "background": background,
+    }
 
 
 async def retrieve(session: AsyncSession, rg: RepoGraph, repo_id: str, query: str, k: int = 10) -> list[Hit]:

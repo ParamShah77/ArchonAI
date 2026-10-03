@@ -19,9 +19,15 @@ export function ApiStatus() {
       </span>
       <span
         className={`chip ${data.llm_configured ? "" : "border-warn/40 text-warn"}`}
-        title={data.llm_configured ? `LLM provider: ${data.llm_provider}` : "No LLM key configured — AI features disabled"}
+        title={
+          data.llm_configured
+            ? `Fallback chain (tried in order):\n${data.llm_chain
+                .map((l, i) => `${i + 1}. ${l.link}  ok ${l.ok} · failed ${l.failed}${l.cooling_down ? " · cooling down" : ""}`)
+                .join("\n")}\nEmbeddings: ${data.embeddings ? "on" : "off"}`
+            : "No LLM key configured — AI features disabled"
+        }
       >
-        LLM: {data.llm_configured ? data.llm_provider : "off"}
+        LLM: {data.llm_configured ? `${data.llm_provider}${data.llm_chain.length > 1 ? ` +${data.llm_chain.length - 1}` : ""}` : "off"}
       </span>
     </span>
   );

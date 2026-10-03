@@ -22,6 +22,7 @@ from archon.context.index import graph_facts, retrieve
 from archon.db.models import FindingRow, Repository
 from archon.graph.model import NodeKind
 from archon.graph.query import RepoGraph
+from archon.llm.chain import last_answered_by
 from archon.services import stacktrace
 from archon.services.architecture import heuristic_report, reconstruct
 from archon.services.impact import analyze_impact, resolve_target
@@ -68,6 +69,11 @@ async def _retrieved(
             }
         )
     return "\n\n".join(parts), sources
+
+
+def _answered_by(ai: Any) -> str | None:
+    """Which chain link produced the AI part (decisions.md D-018); None when there is no AI part."""
+    return last_answered_by.get() or None if ai is not None else None
 
 
 def _node_source(ctx: AnalysisContext, node_id: str, max_lines: int = 120) -> str:
@@ -122,7 +128,7 @@ Return JSON:
   "verification": ["how to reproduce / confirm the fix"],
   "related_risks": ["other places with the same pattern"]}}"""
     ai, err = await _llm_json(prompt)
-    return {"facts": facts, "sources": sources, "ai": ai, "ai_error": err}
+    return {"facts": facts, "sources": sources, "ai": ai, "ai_error": err, "ai_model": _answered_by(ai)}
 
 
 # ----------------------------------------------------------------------------- 8. impact (+ AI summary)
@@ -156,7 +162,7 @@ Return JSON:
 {{"summary": "...", "will_break": [{{"what": "...", "why": "...", "path": "..."}}], "safe_if": ["conditions under which the change is safe"],
   "tests_to_run": ["..."], "migration_steps": ["ordered steps to make the change safely"], "confidence": 0.0-1.0}}"""
     ai, err = await _llm_json(prompt, max_tokens=2500)
-    rep["ai"], rep["ai_error"] = ai, err
+    rep["ai"], rep["ai_error"], rep["ai_model"] = ai, err, _answered_by(ai)
     return rep
 
 
@@ -206,7 +212,7 @@ Most relevant existing code:
 
 {task} Return JSON exactly: {schema}"""
     ai, err = await _llm_json(prompt, max_tokens=4096)
-    return {"facts": facts, "ai": ai, "ai_error": err}
+    return {"facts": facts, "ai": ai, "ai_error": err, "ai_model": _answered_by(ai)}
 
 
 # ----------------------------------------------------------------------------- 7. architecture advisor
@@ -252,6 +258,7 @@ Return JSON:
         "sources": sources,
         "ai": ai,
         "ai_error": err,
+        "ai_model": _answered_by(ai),
     }
 
 
@@ -301,6 +308,7 @@ Return JSON:
         "impact": imp["risk"],
         "ai": ai,
         "ai_error": err,
+        "ai_model": _answered_by(ai),
     }
 
 
@@ -335,6 +343,7 @@ Return JSON:
         "heuristic_cases": heuristic_cases,
         "ai": ai,
         "ai_error": err,
+        "ai_model": _answered_by(ai),
     }
 
 
@@ -465,6 +474,7 @@ Return JSON:
         "quick_findings": quick,
         "ai": ai,
         "ai_error": err,
+        "ai_model": _answered_by(ai),
     }
 
 
@@ -591,5 +601,6 @@ Return JSON:
         "sources": sources,
         "ai": ai,
         "ai_error": err,
+        "ai_model": _answered_by(ai),
         "analyzed_at": datetime.now().isoformat(timespec="seconds"),
     }

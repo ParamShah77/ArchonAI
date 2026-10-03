@@ -27,6 +27,13 @@ async def build_index(
     return await index_repository(session, AnalysisContext(repo, rg), with_embeddings=embeddings)
 
 
+@router.get("/index/status")
+async def index_status(repo: ReadyRepoDep) -> dict[str, Any]:
+    from archon.context import embedder
+
+    return {"pending": await embedder.pending_count(repo.id), **embedder.progress(repo.id)}
+
+
 # ---------------------------------------------------------------- chat
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=4000)

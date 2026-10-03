@@ -128,7 +128,8 @@ export function RepoOverview() {
         ) : arch.data?.ai ? (
           <div className="grid lg:grid-cols-[1.4fr_1fr] gap-6">
             <div className="space-y-4">
-              <div className="flex items-center gap-2 text-xs text-accent"><Sparkles size={14} /> {arch.data.ai.architecture_style}</div>
+              <div className="flex items-center gap-2 text-xs text-accent"><Sparkles size={14} /> {arch.data.ai.architecture_style}
+                {arch.data.ai_model && <span className="text-faint mono ml-auto">{arch.data.ai_model}</span>}</div>
               <p className="leading-relaxed">{arch.data.ai.summary}</p>
               <div>
                 <div className="stat-label mb-2">Components</div>

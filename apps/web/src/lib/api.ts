@@ -135,6 +135,19 @@ export interface ArchitectureReport {
   metrics: Metrics;
   ai: ArchitectureAI | null;
   ai_error?: string;
+  ai_model?: string | null;
+}
+
+export interface LlmLink {
+  link: string;
+  ok: number;
+  failed: number;
+  last_error: string;
+  last_latency_s: number;
+  cooling_down: boolean;
+  tpm_limit?: number;
+  otpm_limit?: number;
+  recovered_json?: number;
 }
 
 export interface Health {
@@ -142,6 +155,8 @@ export interface Health {
   version: string;
   llm_provider: string;
   llm_configured: boolean;
+  llm_chain: LlmLink[];
+  embeddings: boolean;
   database: string;
 }
 
@@ -259,13 +274,13 @@ export interface TestsIntel {
   map: Record<string, string[]>;
 }
 export interface ChatSource { path: string; start_line: number; end_line: number; node_id: string; kind: string; name: string; why: string; score: number }
-export interface ChatResponse { conversation_id: string; answer: string; sources: ChatSource[] }
-export interface ChatMessage { id: string; role: "user" | "assistant"; content: string; sources: ChatSource[]; created_at: string }
+export interface ChatResponse { conversation_id: string; answer: string; sources: ChatSource[]; answered_by?: string }
+export interface ChatMessage { id: string; role: "user" | "assistant"; content: string; sources: ChatSource[]; created_at: string; answered_by?: string }
 export interface Conversation { id: string; title: string; created_at: string }
 export interface Doc { id: string; kind: string; title: string; subject: string; ai: boolean; created_at: string; content?: string }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Json = any;
-export interface AIResult { ai: Json | null; ai_error?: string | null; facts?: Json; sources?: ChatSource[]; [k: string]: Json }
+export interface AIResult { ai: Json | null; ai_error?: string | null; ai_model?: string | null; facts?: Json; sources?: ChatSource[]; [k: string]: Json }
 
 export const DOC_KINDS = ["architecture", "api", "modules", "dataflow", "database", "dependencies", "setup", "onboarding"];
 export const SEVERITY_COLOR: Record<Severity, string> = { critical: "#ff5c7a", high: "#ff7b9c", medium: "#ffb86c", low: "#5aa9ff", info: "#8b93a7" };

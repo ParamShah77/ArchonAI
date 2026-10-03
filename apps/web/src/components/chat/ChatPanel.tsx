@@ -51,7 +51,7 @@ export function ChatPanel() {
         setCid(r.conversation_id);
         convs.refresh();
       }
-      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: r.answer, sources: r.sources, created_at: "" }]);
+      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: r.answer, sources: r.sources, created_at: "", answered_by: r.answered_by }]);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -112,6 +112,7 @@ export function ChatPanel() {
             <div key={m.id} className={`max-w-3xl ${m.role === "user" ? "ml-auto" : ""}`}>
               <div className={`rounded-lg px-4 py-3 ${m.role === "user" ? "bg-accent-soft border border-accent/30" : "card"}`}>
                 {m.role === "user" ? <p className="text-sm whitespace-pre-wrap">{m.content}</p> : <Markdown>{m.content}</Markdown>}
+                {m.answered_by && <div className="mt-2 text-[11px] text-faint mono">answered by {m.answered_by}</div>}
               </div>
               {m.sources?.length > 0 && <Sources repoId={repo.id} sources={m.sources} />}
             </div>

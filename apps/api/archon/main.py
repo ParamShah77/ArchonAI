@@ -13,7 +13,7 @@ from archon.api.routes import analysis, graph, intelligence, repos
 from archon.api.schemas import HealthOut
 from archon.config import get_settings
 from archon.db.session import dispose_db, get_engine, init_db
-from archon.llm import llm_available
+from archon.llm import embed_available, llm_available, llm_status
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -60,6 +60,8 @@ def create_app() -> FastAPI:
             version=__version__,
             llm_provider=settings.archon_llm_provider,
             llm_configured=llm_available(),
+            llm_chain=llm_status(),
+            embeddings=embed_available(),
             database=get_engine().dialect.name,
         )
 

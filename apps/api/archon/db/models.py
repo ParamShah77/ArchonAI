@@ -148,7 +148,8 @@ class CodeChunk(Base):
     start_line: Mapped[int] = mapped_column(Integer, default=0)
     end_line: Mapped[int] = mapped_column(Integer, default=0)
     text: Mapped[str] = mapped_column(Text, default="")
-    embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    # none_as_null: store a missing vector as SQL NULL, not the JSON text 'null' (queries filter on IS NULL).
+    embedding: Mapped[list[float] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
 
 
 class Document(Base):
