@@ -5,8 +5,8 @@
  *   cannot be interrupted from outside and the old result would be thrown away anyway.
  * - Positions are cached per graph shape, so returning to a view (level, focus, filter) is instant.
  */
-import type { Graph } from "@/lib/api";
 import type { LayoutRequest, LayoutResponse } from "./layout.worker";
+import type { ViewModel } from "./viewModel";
 
 export type Positions = Record<string, { x: number; y: number }>;
 
@@ -17,15 +17,15 @@ let busy = false;
 let seq = 0;
 const pending = new Map<number, { resolve: (p: Positions) => void; reject: (e: Error) => void }>();
 
-/** Cheap, stable signature of the graph's shape (node ids + edges). */
-export function graphKey(g: Graph): string {
+/** Cheap, stable signature of the view's shape (nodes, nesting, sizes, edges). */
+export function viewKey(v: ViewModel): string {
   let h = 2166136261;
   const mix = (s: string) => {
     for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
   };
-  for (const n of [...g.nodes].map((x) => x.id).sort()) mix(n);
-  for (const e of [...g.edges].map((x) => `${x.source}>${x.target}`).sort()) mix(e);
-  return `${g.nodes.length}:${g.edges.length}:${(h >>> 0).toString(36)}`;
+  for (const n of [...v.nodes].sort((a, b) => (a.id < b.id ? -1 : 1))) mix(`${n.id}|${n.parent ?? ""}|${n.w}|${n.h}|${n.sortKey}`);
+  for (const e of [...v.edges].map((x) => `${x.source}>${x.target}`).sort()) mix(e);
+  return `${v.nodes.length}:${v.edges.length}:${(h >>> 0).toString(36)}`;
 }
 
 function spawn(): Worker {
@@ -52,7 +52,7 @@ export function cachedLayout(key: string): Positions | undefined {
   return cache.get(key);
 }
 
-export function computeLayout(g: Graph, key: string): Promise<Positions> {
+export function computeLayout(v: ViewModel, key: string): Promise<Positions> {
   const hit = cache.get(key);
   if (hit) return Promise.resolve(hit);
   if (busy && worker) {
@@ -66,8 +66,8 @@ export function computeLayout(g: Graph, key: string): Promise<Positions> {
   const id = ++seq;
   const req: LayoutRequest = {
     id,
-    nodes: g.nodes.map((n) => n.id),
-    edges: g.edges.map((e) => [e.source, e.target]),
+    nodes: v.nodes.map((n) => ({ id: n.id, parent: n.parent, w: n.w, h: n.h, size: n.size, sortKey: n.sortKey })),
+    edges: v.edges.map((e) => [e.source, e.target]),
   };
   return new Promise<Positions>((resolve, reject) => {
     pending.set(id, {

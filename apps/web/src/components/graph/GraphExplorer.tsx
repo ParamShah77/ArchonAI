@@ -22,7 +22,8 @@ export function GraphExplorer() {
   const { repo } = useRepo();
   const router = useRouter();
   const sp = useSearchParams();
-  const level = (sp.get("level") as GraphLevel) || "file";
+  // Start at the top of the drill-down: components, then files, then symbols.
+  const level = (sp.get("level") as GraphLevel) || "system";
   const focus = sp.get("focus");
   const depth = Number(sp.get("depth") || 1);
   const prefix = sp.get("prefix") ?? "";
@@ -58,6 +59,11 @@ export function GraphExplorer() {
 
   const drill = useCallback(
     (id: string) => {
+      if (id.startsWith("__dir__:")) {
+        // a folder rebuilt from file paths on the Symbols level: narrow the view to it
+        setParams({ prefix: id.slice("__dir__:".length), focus: null, node: null });
+        return;
+      }
       const n = graph?.nodes.find((x) => x.id === id);
       if (!n) return;
       if (n.kind === "directory") setParams({ prefix: n.path, level: level === "system" ? "file" : level, focus: null });

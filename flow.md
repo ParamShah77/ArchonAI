@@ -81,9 +81,11 @@ apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /
   /repos/[id]/map                      page.tsx -> <GraphExplorer/> (URL search params are the view state:
                                          level | focus | depth | prefix | node)
                                          GET /repos/{id}/graph?...  -> <GraphCanvas/> (Cytoscape)
-                                           render(): add elements on a spiral (or cached positions) → fit
-                                           → layoutClient.computeLayout(graph) → Web Worker (fCoSE, headless)
-                                           → positions → preset layout; cache by graph shape (D-022)
+                                           render(): viewModel.buildView(graph) → nested boxes, filtered edges,
+                                             sizes, label footprints (D-023) → add elements (cached positions or spiral)
+                                           → layoutClient.computeLayout(view) → Web Worker → layoutCore.runLayout():
+                                             pack() each box in rows → fCoSE on top-level blocks → separateRigid()
+                                           → positions → preset layout (fit); cache by view shape (D-022)
                                          tap node   -> selected -> <NodePanel/> GET /repos/{id}/nodes/{node_id}
                                          dbltap     -> drill(): directory -> prefix; file/symbol -> focus+depth
                                          search box -> GET /repos/{id}/search?q=  -> pick -> focus
@@ -196,6 +198,15 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-06 — Code Map: neat and clear
+- Owner sent screenshots of a cluttered map. Measured on Files: 382 overlapping nodes, 1,425 overlapping labels (worker laid out size-less points).
+- `apps/web/src/components/graph/viewModel.ts` (new): `buildView()` — compound parents from `contains`, orphan symbols into their file, folders rebuilt from paths on Symbols, compact folder chains, packages box with only used packages, edge filtering, sizes, label footprints, `isSynthetic()`.
+- `apps/web/src/components/graph/layoutCore.ts` (new): `runLayout()` — `pack()` rows per box, `placeRoot()` fCoSE on top-level blocks with lifted edges, `separateRigid()`, `emit()`.
+- `layout.worker.ts`: now a thin wrapper over `layoutCore`. `layoutClient.ts`: `viewKey()`; sends parents, footprints and sort keys.
+- `GraphCanvas.tsx`: compound-box styles, label pills and progressive labels, quieter edges, hover lights up connections, selection keeps containing boxes lit, synthetic ids ignored for selection, animation skipped in hidden tabs, preset fits final positions.
+- `GraphExplorer.tsx`: default level System; double-click on a rebuilt folder sets the path prefix.
+- Verified in the browser: 0 overlapping nodes, labels and boxes on System (27 nodes), Files (135 nodes, 41 boxes) and Symbols (631 nodes, 185 boxes); rendered snapshots reviewed. Lint, type-check and production build pass. Decision D-023.
 
 ### Session 2026-10-05 — Code Map freeze fix
 - Owner reported the Code Map hanging. Measured: API < 60 ms per level; fCoSE on the main thread took 5,143 ms for the Symbols level (776 nodes), freezing the page on every view change. Most of the pasted console output came from a browser extension (Lusha), not ARCHON.
