@@ -41,6 +41,7 @@ export const BOX_PADDING = 16; // must match the `:parent` padding in GraphCanva
 const GAP_X = 14;
 const GAP_Y = 10;
 const ROOT_GAP = 40;
+const ROOT_PACK_MAX = 12; // up to this many top-level blocks are packed in rows; more use fCoSE
 const ASPECT = 1.7; // preferred width/height of a packed box
 const LABEL_SLOT = 18; // must match viewModel.LABEL_SLOT
 
@@ -69,34 +70,34 @@ interface Item {
   y: number;
 }
 
-function pack(item: Item): void {
+function pack(item: Item, gx = GAP_X, gy = GAP_Y, recurse = true): void {
   if (item.leaf) {
     item.w = item.leaf.w;
     item.h = item.leaf.h;
     return;
   }
-  for (const c of item.children) pack(c);
+  if (recurse) for (const c of item.children) pack(c);
   const kids = [...item.children].sort((a, b) => {
     if (!!a.leaf !== !!b.leaf) return a.leaf ? 1 : -1; // boxes before loose leaves
     if (!a.leaf && !b.leaf) return b.h - a.h || b.w - a.w; // tallest first: rows of similar height waste less space
     return (a.leaf!.sortKey < b.leaf!.sortKey ? -1 : 1);
   });
-  const area = kids.reduce((s, k) => s + (k.w + GAP_X) * (k.h + GAP_Y), 0);
+  const area = kids.reduce((s, k) => s + (k.w + gx) * (k.h + gy), 0);
   const maxW = Math.max(0, ...kids.map((k) => k.w));
   const target = Math.max(maxW, Math.sqrt(area * ASPECT));
   // shelf packing: fill a row up to the target width, then start the next row
   let x = 0, y = 0, rowH = 0, contentW = 0;
   for (const k of kids) {
     if (x > 0 && x + k.w > target) {
-      y += rowH + GAP_Y;
+      y += rowH + gy;
       x = 0;
       rowH = 0;
     }
     k.x = x + k.w / 2;
     k.y = y + k.h / 2;
-    x += k.w + GAP_X;
+    x += k.w + gx;
     rowH = Math.max(rowH, k.h);
-    contentW = Math.max(contentW, x - GAP_X);
+    contentW = Math.max(contentW, x - gx);
   }
   const contentH = y + rowH;
   // centre each row horizontally inside the box for a tidier look
@@ -131,10 +132,12 @@ function placeRoot(roots: Item[], rootOf: Map<string, string>, edges: [string, s
     const k = a < b ? `${a}|${b}` : `${b}|${a}`;
     lifted.set(k, (lifted.get(k) ?? 0) + 1);
   }
-  if (lifted.size === 0) {
-    // nothing connects them: a tidy grid of blocks
+  if (lifted.size === 0 || roots.length <= ROOT_PACK_MAX) {
+    // few top-level blocks (or nothing connects them): a tidy grid, biggest first, with a gap that
+    // scales with the map so the blocks read as separate even when zoomed all the way out
+    const gap = Math.max(ROOT_GAP, 0.07 * Math.sqrt(roots.reduce((s, r) => s + r.w * r.h, 0)));
     const box: Item = { id: "__root__", children: roots, w: 0, h: 0, x: 0, y: 0 };
-    pack(box);
+    pack(box, gap, gap, false);
     for (const r of roots) {
       r.x -= box.w / 2;
       r.y -= box.h / 2;

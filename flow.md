@@ -78,18 +78,20 @@ apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /
   /repos/[id]                          layout.tsx awaits params -> <RepoShell id>
                                          RepoShell: GET /repos/{id} (polls while not ready), provides RepoContext, tabs
                                          page.tsx -> <RepoOverview/>: stats from repo row, GET /repos/{id}/architecture
-  /repos/[id]/map                      page.tsx -> <GraphExplorer/>  (semantic zoom, D-024)
+  /repos/[id]/map                      page.tsx -> <GraphExplorer/>  (semantic zoom, D-024; renderer D-026)
                                          GET /repos/{id}/graph?level=all  (whole hierarchy, once)
-                                         -> <GraphCanvas/> render(): viewModel.buildView() (nesting, wrapper
-                                            folders dissolved, packages box) -> worker layoutCore.runLayout()
-                                            -> rectangles for every box and leaf -> all elements added, hidden
-                                         refreshDetail() on every viewport change (≤ every 70 ms + once after
-                                            the last movement): walk from the roots, open a box when it covers
-                                            ~30% of the screen; show children of open boxes; merge code-level
-                                            edges onto visible stand-ins (on-screen only); fix on-screen stroke
-                                            widths and tile font sizes; update the breadcrumb
-                                         tap -> select -> <NodePanel/> GET /repos/{id}/nodes/{node_id}
-                                         dbltap / breadcrumb / search -> zoomTo(id) (fly to the box)
+                                         -> <MapCanvas/>: viewModel.buildView() (nesting, wrapper folders
+                                            dissolved, packages box) -> worker layoutCore.runLayout() (rows; up to
+                                            12 top-level blocks packed, more placed by fCoSE) -> rectangles
+                                            -> mapModel.buildMapModel() (tree, ancestors, component hues, summaries)
+                                         d3-zoom (wheel / pinch / drag) -> target transform -> requestDraw()
+                                         draw() each animation frame while moving: ease view toward target ->
+                                            walk boxes from the roots: openness t from on-screen size (gated past
+                                            home zoom), children visible by t -> frames -> merged relationships
+                                            (edges spread over visible stand-ins) -> tiles -> symbol chips -> pills
+                                            -> hover/selection glow -> breadcrumb (deepest open box at centre)
+                                         click -> pick() -> select -> <NodePanel/> GET /repos/{id}/nodes/{node_id}
+                                         dblclick / breadcrumb / search -> zoomTo(id) -> d3 transition (fly)
                                          ?node=, ?focus= -> zoomTo; ?prefix= -> zoomToPath (all boxes under it)
 ```
 Data hook: `src/lib/hooks.ts::useApi(key, fetcher, {pollMs, pollWhile})` — refetches when `key` changes;
@@ -200,6 +202,21 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-06 (evening) — Code Map: smooth canvas renderer
+- Owner found the map basic and stuttering and asked about tools like three.js. Replaced the Cytoscape renderer with d3-zoom + a custom Canvas2D renderer (decision D-026, which explains why not three.js).
+- New `apps/web/src/components/graph/MapCanvas.tsx`: `draw()` (eased camera, openness/visibility walk, `drawGrid`, `drawFrame`, `drawEdges`, `drawTile`, `drawPill`, `drawChip`, `drawHalo`, `updateCrumbs`), `pick()`, `zoomTo()`, `zoomToPath()`, `fly()`, `homeTransform()`; d3-zoom wiring, ResizeObserver, tooltip; same `MapController`/`Crumb` API as before.
+- New `mapModel.ts`: `buildMapModel()`, `tint()`, `withAlpha()`, `summarize()` (moved out of the old canvas).
+- Deleted `GraphCanvas.tsx`. `GraphExplorer.tsx` uses `<MapCanvas/>`; new hint text.
+- `layoutCore.ts`: `pack()` takes gaps and a recurse flag; up to 12 top-level blocks are packed in rows with a scaled gap. `viewModel.ts`: wider leaf footprints for chip labels; packages group labelled "Packages (N)".
+- `package.json`: d3-zoom, d3-selection, d3-transition, d3-ease (+ types).
+- Verified in the browser with canvas snapshots: overview (5 closed tiles, no overlaps), `apps/api/archon`, `services`, `reasoning.py`, mid-zoom fades, hover glow; real wheel events through d3-zoom, click -> panel + `?node=`, double-click fly, breadcrumb, `?prefix=apps/web`. Frame time ~1.6 ms. Lint, type-check and production build pass.
+
+### Session 2026-10-06 (security) — Patch Next.js advisories
+- `npm audit` in `apps/web` showed a critical in `next` (RCE in `next/og` `ImageResponse`, which ARCHON does not use) and highs in `brace-expansion` and `braces` (lint tooling).
+- `apps/web/package.json`: `next` and `eslint-config-next` 16.3.4 → 16.3.8 (exact pins). `apps/web/package-lock.json`: `@next/*` to 16.3.8 and `brace-expansion` to 1.1.21 / 5.0.12 via non-forced `npm audit fix`; no other packages moved.
+- Remaining: 5 high advisories, all from one `braces@3.0.3` chain under `@next/eslint-plugin-next`. No patched `braces` exists, and it is dev-only, so it was accepted (decision D-025).
+- No code or runtime flow changes. Lint, `tsc --noEmit` and `next build` pass.
 
 ### Session 2026-10-06 (later) — Code Map: semantic zoom and soft palette
 - Owner rejected the nested static map: wants an overview first and detail added step by step while zooming, with a soft colour theme.

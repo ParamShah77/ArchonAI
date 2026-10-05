@@ -178,7 +178,7 @@ export function buildView(g: Graph): ViewModel {
       kind: n.kind,
       parent: parentOf.get(n.id),
       size,
-      w: Math.max(size, chars * 6.3 + 10),
+      w: Math.max(size, chars * 6.7 + 34), // room for the chip: kind dot + monospace name
       h: MAX_SIZE + LABEL_SLOT, // same slot height for every node so rows line up
       major: isParent.has(n.id) || n.kind === "endpoint" || n.kind === "table" || (d > 0 && d >= hubCut),
       sortKey: `${KIND_ORDER[n.kind] ?? 9}${label.toLowerCase()}`,
@@ -188,7 +188,7 @@ export function buildView(g: Graph): ViewModel {
   });
   if ([...byId.values()].some((n) => n.kind === "dependency")) {
     const count = nodes.filter((n) => n.parent === PACKAGES_ID).length;
-    nodes.push({ id: PACKAGES_ID, label: `External packages used (${count})`, kind: "group", size: 0, w: 0, h: 0, major: true, sortKey: "z", path: "", synthetic: true });
+    nodes.push({ id: PACKAGES_ID, label: `Packages (${count})`, kind: "group", size: 0, w: 0, h: 0, major: true, sortKey: "z", path: "", synthetic: true });
   }
   return { nodes, edges };
 }

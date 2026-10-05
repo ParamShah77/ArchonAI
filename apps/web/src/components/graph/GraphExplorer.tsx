@@ -6,7 +6,7 @@ import { ChevronRight, Maximize2, Search } from "lucide-react";
 import { api, KIND_STYLE, type GraphNode, type NodeKind } from "@/lib/api";
 import { useApi, useDebounced } from "@/lib/hooks";
 import { useRepo } from "@/components/RepoShell";
-import { GraphCanvas, type Crumb, type MapController } from "@/components/graph/GraphCanvas";
+import { MapCanvas, type Crumb, type MapController } from "@/components/graph/MapCanvas";
 import { NodePanel } from "@/components/graph/NodePanel";
 import { ErrorBox, KindBadge, Spinner } from "@/components/ui";
 
@@ -129,11 +129,11 @@ export function GraphExplorer() {
             <div className="absolute top-3 left-3 z-10 chip"><Spinner className="h-3 w-3" /> loading map</div>
           )}
           {graph && (
-            <GraphCanvas graph={graph} selected={selected} onSelect={setSelected} onCrumbs={setCrumbs} onReady={onReady} />
+            <MapCanvas graph={graph} selected={selected} onSelect={setSelected} onCrumbs={setCrumbs} onReady={onReady} />
           )}
 
           <div className="absolute bottom-3 left-3 z-10 pointer-events-none">
-            <div className="rounded-lg border border-line bg-[#12151c]/90 px-3 py-2 text-[11px] text-muted space-y-1.5 backdrop-blur">
+            <div className="rounded-lg border border-line bg-[#0f1218]/90 px-3 py-2 text-[11px] text-muted space-y-1.5 backdrop-blur">
               <div className="flex flex-wrap gap-x-3 gap-y-1">
                 {LEGEND.filter((k) => counts.has(k)).map((k) => (
                   <span key={k} className="flex items-center gap-1.5">
@@ -142,7 +142,7 @@ export function GraphExplorer() {
                   </span>
                 ))}
               </div>
-              <div className="text-faint">Scroll to zoom: detail appears as you go in · double-click to open · click to inspect</div>
+              <div className="text-faint">Scroll or pinch to zoom: detail fades in as you go · drag to pan · double-click to fly in · click to inspect</div>
             </div>
           </div>
         </div>
