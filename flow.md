@@ -80,7 +80,10 @@ apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /
                                          page.tsx -> <RepoOverview/>: stats from repo row, GET /repos/{id}/architecture
   /repos/[id]/map                      page.tsx -> <GraphExplorer/> (URL search params are the view state:
                                          level | focus | depth | prefix | node)
-                                         GET /repos/{id}/graph?...  -> <GraphCanvas/> (Cytoscape, fcose layout)
+                                         GET /repos/{id}/graph?...  -> <GraphCanvas/> (Cytoscape)
+                                           render(): add elements on a spiral (or cached positions) → fit
+                                           → layoutClient.computeLayout(graph) → Web Worker (fCoSE, headless)
+                                           → positions → preset layout; cache by graph shape (D-022)
                                          tap node   -> selected -> <NodePanel/> GET /repos/{id}/nodes/{node_id}
                                          dbltap     -> drill(): directory -> prefix; file/symbol -> focus+depth
                                          search box -> GET /repos/{id}/search?q=  -> pick -> focus
@@ -193,6 +196,13 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-05 — Code Map freeze fix
+- Owner reported the Code Map hanging. Measured: API < 60 ms per level; fCoSE on the main thread took 5,143 ms for the Symbols level (776 nodes), freezing the page on every view change. Most of the pasted console output came from a browser extension (Lusha), not ARCHON.
+- `apps/web/src/components/graph/layout.worker.ts` (new): headless Cytoscape + fCoSE in a Web Worker.
+- `apps/web/src/components/graph/layoutClient.ts` (new): `computeLayout()`, `cachedLayout()`, `graphKey()`; single worker, stale runs terminated, LRU position cache.
+- `apps/web/src/components/graph/GraphCanvas.tsx`: `render()` shows nodes immediately and applies worker positions; "arranging N nodes…" / error chip; `textureOnViewport`; straight edges for large graphs; literal font stack; default wheel sensitivity; resize observer re-fits only on size changes.
+- Verified: worst main-thread stall 189 ms during a Symbols load; level switches responsive; cached views skip layout; lint, type-check and production build pass. Decision D-022.
 
 ### Session 2026-10-03 — Real LLM keys: provider fixes and fallback chain
 - Owner added Gemini and Groq keys. Smoke tests showed both keys authenticate but the default models (`gemini-2.5-flash`, `llama-3.3-70b-versatile`) are retired for this account; Gemini 3.x returned empty text because thinking tokens consumed the output cap; Gemini free tier also returned 503 "high demand" and some calls took 50–110 s.

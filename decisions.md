@@ -249,3 +249,16 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
 - **Alternatives considered:** Hard-code a lower constant (would be wrong for paid tiers or quota changes); exponential backoff only (keeps hitting the same ceiling every minute); local embedding model (no quota, but slow on a laptop and a large new dependency).
 - **Why this one:** Converges on whatever the account actually allows without configuration, and still runs at full speed on accounts with higher limits.
 - **Consequences:** A fresh 700-chunk repository takes roughly 15–25 minutes to embed fully on the free tier; keyword retrieval works throughout.
+
+## D-022 — Code-map layout runs in a Web Worker, with cached positions
+- **Date:** 2026-10-05
+- **Status:** Accepted (refines D-008)
+- **Context:** The owner reported the Code Map "not responding". Measured on this repository: the API returns every level in < 60 ms, but the fCoSE layout ran synchronously on the browser's main thread — 5.1 s for the Symbols level (776 nodes, 1,630 edges) at `quality: "default"`, which D-008 used up to 800 nodes. The page could not respond during that time, and the freeze recurred on every level switch, kind filter toggle, and focus change. Two console warnings also came from the map: an invalid canvas font (`var(--font-geist-mono)`; canvas cannot resolve CSS variables) and a custom `wheelSensitivity`.
+- **Decision:**
+  - `components/graph/layout.worker.ts` runs headless Cytoscape + fCoSE in a module Web Worker and returns positions; `GraphCanvas` shows the graph immediately on a spiral, displays "arranging N nodes…", then applies positions with a `preset` layout (animated below 400 nodes).
+  - `layoutClient.ts` keeps one worker; a newer request terminates a still-running one (fCoSE cannot be interrupted, and its result would be discarded). Positions are cached by a hash of node and edge ids (24 entries), so revisiting a view is instant.
+  - Worker uses `quality: "draft"` above 350 nodes (≈1 s instead of ≈5 s, visually close).
+  - Rendering: `textureOnViewport` while panning/zooming; straight edges without arrows above 1,200 elements; concrete monospace font stack; default wheel sensitivity; the resize observer re-fits only on real size changes.
+- **Alternatives considered:** Only lowering the draft threshold (still freezes ~1 s per change, and grows with repo size); chunked layout on the main thread via `requestIdleCallback` (fCoSE has no incremental API); switching to a WebGL library such as Sigma.js (larger rewrite; rendering was not the bottleneck); server-side layout in Python (adds a dependency and a round trip, and positions depend on client-side filters).
+- **Why this one:** Removes the freeze entirely regardless of graph size, keeps the existing renderer and interactions, and needs no new dependency (Turbopack bundles `new Worker(new URL(...))`).
+- **Consequences:** Verified in the browser: worst main-thread stall during a Symbols load dropped from 5,143 ms to 189 ms (the remaining cost is adding elements to the canvas); returning to a cached view skips layout. Very large graphs still take seconds to *arrange*, but the page stays usable meanwhile.
