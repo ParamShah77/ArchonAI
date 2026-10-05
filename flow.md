@@ -78,17 +78,19 @@ apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /
   /repos/[id]                          layout.tsx awaits params -> <RepoShell id>
                                          RepoShell: GET /repos/{id} (polls while not ready), provides RepoContext, tabs
                                          page.tsx -> <RepoOverview/>: stats from repo row, GET /repos/{id}/architecture
-  /repos/[id]/map                      page.tsx -> <GraphExplorer/> (URL search params are the view state:
-                                         level | focus | depth | prefix | node)
-                                         GET /repos/{id}/graph?...  -> <GraphCanvas/> (Cytoscape)
-                                           render(): viewModel.buildView(graph) → nested boxes, filtered edges,
-                                             sizes, label footprints (D-023) → add elements (cached positions or spiral)
-                                           → layoutClient.computeLayout(view) → Web Worker → layoutCore.runLayout():
-                                             pack() each box in rows → fCoSE on top-level blocks → separateRigid()
-                                           → positions → preset layout (fit); cache by view shape (D-022)
-                                         tap node   -> selected -> <NodePanel/> GET /repos/{id}/nodes/{node_id}
-                                         dbltap     -> drill(): directory -> prefix; file/symbol -> focus+depth
-                                         search box -> GET /repos/{id}/search?q=  -> pick -> focus
+  /repos/[id]/map                      page.tsx -> <GraphExplorer/>  (semantic zoom, D-024)
+                                         GET /repos/{id}/graph?level=all  (whole hierarchy, once)
+                                         -> <GraphCanvas/> render(): viewModel.buildView() (nesting, wrapper
+                                            folders dissolved, packages box) -> worker layoutCore.runLayout()
+                                            -> rectangles for every box and leaf -> all elements added, hidden
+                                         refreshDetail() on every viewport change (≤ every 70 ms + once after
+                                            the last movement): walk from the roots, open a box when it covers
+                                            ~30% of the screen; show children of open boxes; merge code-level
+                                            edges onto visible stand-ins (on-screen only); fix on-screen stroke
+                                            widths and tile font sizes; update the breadcrumb
+                                         tap -> select -> <NodePanel/> GET /repos/{id}/nodes/{node_id}
+                                         dbltap / breadcrumb / search -> zoomTo(id) (fly to the box)
+                                         ?node=, ?focus= -> zoomTo; ?prefix= -> zoomToPath (all boxes under it)
 ```
 Data hook: `src/lib/hooks.ts::useApi(key, fetcher, {pollMs, pollWhile})` — refetches when `key` changes;
 `loading` is true only until the first result for the current key arrives.
@@ -198,6 +200,16 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-06 (later) — Code Map: semantic zoom and soft palette
+- Owner rejected the nested static map: wants an overview first and detail added step by step while zooming, with a soft colour theme.
+- API: `routes/graph.get_graph` accepts `level=all` (whole hierarchy, `MAX_NODES_ALL`); test added in `tests/test_api.py`.
+- `apps/web/src/components/graph/GraphCanvas.tsx` rewritten: `buildModel()`, `toElements()`, `summarize()`, `tint()`, `fly()`; `refreshDetail()` (level of detail, merged on-screen relationships, constant strokes, adaptive tile text, breadcrumb), `applySelection()`, `zoomTo()`, `zoomToPath()`, `reset()`; trailing-safe viewport throttle.
+- `GraphExplorer.tsx` rewritten: one `level=all` request, Overview button, breadcrumb, search that flies to results, deep links, legend.
+- `viewModel.ts`: wrapper folders (only sub-folders) dissolve into path-named children. `layoutCore.ts`: `runLayout()` returns `Rect` for every node; `headerFor()` uncapped.
+- `lib/api.ts`: soft `KIND_STYLE` / `EDGE_STYLE` palette (shared with badges); `GraphLevel` includes `all`.
+- Verified in the browser: overview 5 tiles → archon 16 → services 43 → a file ~70; double-click, breadcrumb, Overview, tap→panel, search→fly and select, `?prefix=` all work; no long tasks during a zoom sweep; snapshots reviewed at four depths. Lint, type-check, build and 35 backend tests pass. Decision D-024.
+- The API on port 8000 was restarted from the session's launch configuration so it serves `level=all`.
 
 ### Session 2026-10-06 — Code Map: neat and clear
 - Owner sent screenshots of a cluttered map. Measured on Files: 382 overlapping nodes, 1,425 overlapping labels (worker laid out size-less points).

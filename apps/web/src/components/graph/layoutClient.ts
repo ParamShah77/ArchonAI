@@ -8,7 +8,9 @@
 import type { LayoutRequest, LayoutResponse } from "./layout.worker";
 import type { ViewModel } from "./viewModel";
 
-export type Positions = Record<string, { x: number; y: number }>;
+import type { Rect } from "./layoutCore";
+
+export type Positions = Record<string, Rect>;
 
 const CACHE_LIMIT = 24;
 const cache = new Map<string, Positions>();

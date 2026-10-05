@@ -50,6 +50,11 @@ async def test_ingest_local_repo_and_query_graph(client: AsyncClient, fixture_re
     g = (await client.get(f"/repos/{rid}/graph", params={"level": "symbol", "kinds": "function,method"})).json()
     assert any(n["name"] == "place_order" for n in g["nodes"])
 
+    full = (await client.get(f"/repos/{rid}/graph", params={"level": "all"})).json()
+    kinds = {n["kind"] for n in full["nodes"]}
+    assert {"directory", "file", "function", "dependency"} <= kinds and "repo" not in kinds
+    assert any(e["kind"] == "contains" for e in full["edges"]) and any(e["kind"] == "calls" for e in full["edges"])
+
     s = (await client.get(f"/repos/{rid}/search", params={"q": "place_order"})).json()
     node_id = s["results"][0]["id"]
     d = (await client.get(f"/repos/{rid}/nodes/{node_id}")).json()

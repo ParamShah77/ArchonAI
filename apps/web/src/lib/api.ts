@@ -47,7 +47,7 @@ export type NodeKind =
   | "repo" | "directory" | "file" | "module" | "class" | "function" | "method" | "endpoint" | "table" | "dependency";
 export type EdgeKind =
   | "contains" | "imports" | "calls" | "extends" | "implements" | "exposes" | "queries" | "depends_on";
-export type GraphLevel = "system" | "file" | "symbol";
+export type GraphLevel = "system" | "file" | "symbol" | "all";
 
 export interface GraphNode {
   id: string;
@@ -340,26 +340,30 @@ export const api = {
 };
 
 /** Visual identity of each node kind — shared by the map, badges and the detail panel. */
+/**
+ * Visual identity of each kind — shared by the map, badges and panels. A soft, low-saturation palette
+ * (decisions.md D-024): distinct hues at similar lightness, so nothing shouts on the dark background.
+ */
 export const KIND_STYLE: Record<NodeKind, { color: string; label: string; shape: string }> = {
-  repo: { color: "#f5f5f5", label: "Repository", shape: "round-rectangle" },
-  directory: { color: "#8b93a7", label: "Directory", shape: "round-rectangle" },
-  file: { color: "#5aa9ff", label: "File", shape: "round-rectangle" },
-  module: { color: "#5aa9ff", label: "Module", shape: "round-rectangle" },
-  class: { color: "#c792ea", label: "Class", shape: "hexagon" },
-  function: { color: "#7ee0a0", label: "Function", shape: "ellipse" },
-  method: { color: "#4ec9b0", label: "Method", shape: "ellipse" },
-  endpoint: { color: "#ffb86c", label: "Endpoint", shape: "diamond" },
-  table: { color: "#ff7b9c", label: "Table", shape: "barrel" },
-  dependency: { color: "#e6db74", label: "Dependency", shape: "tag" },
+  repo: { color: "#dfe4ec", label: "Repository", shape: "round-rectangle" },
+  directory: { color: "#9aabc4", label: "Folder", shape: "round-rectangle" },
+  file: { color: "#8ab9d6", label: "File", shape: "round-rectangle" },
+  module: { color: "#8ab9d6", label: "Module", shape: "round-rectangle" },
+  class: { color: "#b8a7db", label: "Class", shape: "round-rectangle" },
+  function: { color: "#9ccfac", label: "Function", shape: "ellipse" },
+  method: { color: "#92c6bf", label: "Method", shape: "ellipse" },
+  endpoint: { color: "#e3b993", label: "Endpoint", shape: "round-diamond" },
+  table: { color: "#dfa3b1", label: "Table", shape: "barrel" },
+  dependency: { color: "#d6cb99", label: "Package", shape: "round-tag" },
 };
 
 export const EDGE_STYLE: Record<EdgeKind, { color: string; style: "solid" | "dashed" | "dotted"; label: string }> = {
-  contains: { color: "#3a4152", style: "solid", label: "contains" },
-  imports: { color: "#5aa9ff", style: "solid", label: "imports" },
-  calls: { color: "#7ee0a0", style: "solid", label: "calls" },
-  extends: { color: "#c792ea", style: "dashed", label: "extends" },
-  implements: { color: "#c792ea", style: "dotted", label: "implements" },
-  exposes: { color: "#ffb86c", style: "dashed", label: "exposes" },
-  queries: { color: "#ff7b9c", style: "dashed", label: "queries" },
-  depends_on: { color: "#e6db74", style: "dotted", label: "depends on" },
+  contains: { color: "#4a5265", style: "solid", label: "contains" },
+  imports: { color: "#8aa4c6", style: "solid", label: "imports" },
+  calls: { color: "#94c2a3", style: "solid", label: "calls" },
+  extends: { color: "#ad9fd0", style: "dashed", label: "extends" },
+  implements: { color: "#ad9fd0", style: "dotted", label: "implements" },
+  exposes: { color: "#d6b08f", style: "dashed", label: "exposes" },
+  queries: { color: "#d39ca9", style: "dashed", label: "queries" },
+  depends_on: { color: "#c8bf92", style: "dotted", label: "depends on" },
 };

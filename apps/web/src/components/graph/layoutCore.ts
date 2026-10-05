@@ -32,21 +32,34 @@ export interface LayoutRequest {
 
 export interface LayoutResponse {
   id: number;
-  positions?: Record<string, { x: number; y: number }>;
+  positions?: Record<string, Rect>;
   error?: string;
   ms: number;
 }
 
 export const BOX_PADDING = 16; // must match the `:parent` padding in GraphCanvas
-const LABEL_HEADER = 18; // room for a box title above its contents
 const GAP_X = 14;
 const GAP_Y = 10;
 const ROOT_GAP = 40;
 const ASPECT = 1.7; // preferred width/height of a packed box
 const LABEL_SLOT = 18; // must match viewModel.LABEL_SLOT
 
+/** Title band at the top of a box; grows with the box so its title stays legible when zoomed out. */
+export function headerFor(w: number): number {
+  return Math.max(20, w / 22);
+}
+
+export interface Rect {
+  x: number; // centre
+  y: number;
+  w: number;
+  h: number;
+  header?: number; // boxes only
+}
+
 interface Item {
   id: string;
+  header?: number;
   leaf?: LayoutNode;
   children: Item[];
   w: number;
@@ -100,7 +113,8 @@ function pack(item: Item): void {
   }
   item.children = kids;
   item.w = contentW + 2 * BOX_PADDING;
-  item.h = contentH + 2 * BOX_PADDING + LABEL_HEADER;
+  item.header = headerFor(item.w);
+  item.h = contentH + 2 * BOX_PADDING + item.header;
 }
 
 function placeRoot(roots: Item[], rootOf: Map<string, string>, edges: [string, string][]): void {
@@ -191,20 +205,20 @@ function separateRigid(items: Item[]): void {
   }
 }
 
-/** Turn relative child centres into absolute leaf positions. */
-function emit(item: Item, cx: number, cy: number, out: Record<string, { x: number; y: number }>): void {
+/** Turn relative child centres into absolute rectangles for every leaf and box. */
+function emit(item: Item, cx: number, cy: number, out: Record<string, Rect>): void {
   if (item.leaf) {
-    // the footprint is a node slot plus a label slot underneath: centre the node in its slot, so every
-    // node in a row shares one centre line whatever its size
-    out[item.id] = { x: cx, y: cy - item.h / 2 + (item.h - LABEL_SLOT) / 2 };
+    // the footprint is a node slot plus a label slot underneath: centre the node in its slot
+    out[item.id] = { x: cx, y: cy - item.h / 2 + (item.h - LABEL_SLOT) / 2, w: item.w, h: item.h };
     return;
   }
+  out[item.id] = { x: cx, y: cy, w: item.w, h: item.h, header: item.header };
   const ox = cx - item.w / 2 + BOX_PADDING;
-  const oy = cy - item.h / 2 + BOX_PADDING + LABEL_HEADER;
+  const oy = cy - item.h / 2 + BOX_PADDING + (item.header ?? 0);
   for (const c of item.children) emit(c, ox + c.x, oy + c.y, out);
 }
 
-export function runLayout(nodes: LayoutNode[], edges: [string, string][]): Record<string, { x: number; y: number }> {
+export function runLayout(nodes: LayoutNode[], edges: [string, string][]): Record<string, Rect> {
   const items = new Map<string, Item>();
   for (const n of nodes) items.set(n.id, { id: n.id, children: [], w: 0, h: 0, x: 0, y: 0 });
   const hasChildren = new Set<string>();
@@ -228,7 +242,7 @@ export function runLayout(nodes: LayoutNode[], edges: [string, string][]): Recor
   };
   for (const r of roots) mark(r, r.id);
   placeRoot(roots, rootOf, edges);
-  const out: Record<string, { x: number; y: number }> = {};
+  const out: Record<string, Rect> = {};
   for (const r of roots) emit(r, r.x, r.y, out);
   return out;
 }

@@ -14,6 +14,7 @@ from archon.services.architecture import reconstruct
 router = APIRouter(prefix="/repos/{repo_id}", tags=["graph"])
 
 MAX_NODES = 1500
+MAX_NODES_ALL = 20000  # semantic zoom hides most of these until the user zooms in
 
 
 def _parse_kinds(kinds: str | None) -> set[NodeKind] | None:
@@ -33,12 +34,24 @@ def _parse_kinds(kinds: str | None) -> set[NodeKind] | None:
 @router.get("/graph", response_model=GraphOut)
 async def get_graph(
     rg: GraphDep,
-    level: str = Query("file", pattern="^(system|file|symbol)$"),
+    level: str = Query("file", pattern="^(system|file|symbol|all)$"),
     focus: str | None = None,
     depth: int = Query(1, ge=1, le=4),
     kinds: str | None = None,
     path_prefix: str | None = Query(None, description="only nodes under this repo-relative path"),
 ) -> GraphOut:
+    if level == "all" and not focus:
+        # The whole hierarchy (folders, files, symbols, packages) for the semantic-zoom map, which decides
+        # on the client how much detail to draw at each zoom level (decisions.md D-024).
+        nodes = [n for n in rg.nodes.values() if n.kind != NodeKind.REPO]
+        ids = {n.id for n in nodes}
+        edges = [e for e in rg.edges if e.source in ids and e.target in ids]
+        return GraphOut(
+            level=level,
+            focus=None,
+            nodes=[NodeOut.from_node(n) for n in nodes[:MAX_NODES_ALL]],
+            edges=[EdgeOut.from_edge(e) for e in edges],
+        )
     if focus:
         nodes, edges = rg.neighborhood(focus, depth=depth, kinds=_parse_kinds(kinds))
     else:

@@ -104,8 +104,9 @@ export function buildView(g: Graph): ViewModel {
       parentOf.set(id, ensureDir(path.slice(0, path.lastIndexOf("/"))));
     }
   }
-  // Compact folders (like VS Code): a folder whose only child is another folder merges into it,
-  // so `apps/api/archon` is one box instead of three nested ones.
+  // Compact folders: a folder that holds only folders (no files of its own) is a wrapper. It dissolves and
+  // its sub-folders take its place, named with the path (`apps/api`, `apps/web`). A one-child chain
+  // collapses the same way (`api/archon` like VS Code), so the overview shows real components as peers.
   const labelOverride = new Map<string, string>();
   for (let changed = true; changed; ) {
     changed = false;
@@ -116,12 +117,15 @@ export function buildView(g: Graph): ViewModel {
     }
     for (const [p, cs] of kids) {
       const pn = byId.get(p);
-      const only = cs.length === 1 ? byId.get(cs[0]) : undefined;
-      if (!pn || pn.kind !== "directory" || !only || only.kind !== "directory") continue;
-      labelOverride.set(only.id, `${labelOverride.get(p) ?? pn.name}/${labelOverride.get(only.id) ?? only.name}`);
+      if (!pn || pn.kind !== "directory" || !cs.length) continue;
+      if (!cs.every((c) => byId.get(c)?.kind === "directory")) continue;
       const grand = parentOf.get(p);
-      if (grand) parentOf.set(only.id, grand);
-      else parentOf.delete(only.id);
+      for (const c of cs) {
+        const cn = byId.get(c)!;
+        labelOverride.set(c, `${labelOverride.get(p) ?? pn.name}/${labelOverride.get(c) ?? cn.name}`);
+        if (grand) parentOf.set(c, grand);
+        else parentOf.delete(c);
+      }
       parentOf.delete(p);
       byId.delete(p);
       changed = true;
