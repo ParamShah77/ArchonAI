@@ -14,7 +14,9 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
+    // suppressHydrationWarning: browser extensions (e.g. QuillBot's data-qb-installed) add attributes to <html>
+    // before React loads; this silences that one-level attribute mismatch only, not mismatches in the page
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`} suppressHydrationWarning>
       {/* h-full (not min-h-full): the code map needs a definite height chain down to its canvas */}
       <body className="h-full flex flex-col overflow-hidden">
         <header className="h-12 shrink-0 border-b border-line bg-elev/80 backdrop-blur flex items-center px-4 gap-6">
