@@ -203,6 +203,11 @@ Bash tool call in Claude Code
 
 ## Session changelog
 
+### Session 2026-10-10 — Code Map: never stay blank
+- Owner saw an empty Code Map (toolbar shown, no map) in their browser; it rendered correctly in a clean browser at the same size, so the renderer was hardened against the plausible causes.
+- `apps/web/src/components/graph/MapCanvas.tsx`: new `goHome()` places the camera only once the canvas has a real size (a 0×0 canvas at load gave zoom 0 forever); `resize()` retries it, `renderFrame()` waits for it. `draw()` now wraps `renderFrame()` and shows "drawing failed: …" in the corner chip (and the console) instead of a silent blank canvas. `roundRect()` falls back to arcs on browsers without `CanvasRenderingContext2D.roundRect`.
+- Flow change (§3.4): the home view is applied on model build or on the first resize with a non-zero size, whichever comes later.
+
 ### Session 2026-10-07 — Silence extension-caused hydration warning
 - Owner's console showed a hydration mismatch on `<html>` caused by browser extensions adding attributes before React loads (`data-qb-installed`, `suppresshydrationwarning`), alongside unrelated errors from the Lusha extension (`dashboard-services.lusha.com` 401, CSP blocks, Stripe.js).
 - `apps/web/src/app/layout.tsx` `RootLayout`: `suppressHydrationWarning` on `<html>` (one level only; mismatches inside the page still warn). No flow change.

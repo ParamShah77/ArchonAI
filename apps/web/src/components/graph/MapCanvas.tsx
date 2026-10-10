@@ -100,6 +100,8 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
     textW: new Map<string, number>(),
     seq: 0,
     homeK: 0,
+    homed: false, // home view applied (needs a real canvas size)
+    drawError: "",
     pills: [] as (() => void)[],
   });
   const cb = useRef({ onSelect, onCrumbs, onReady });
@@ -168,10 +170,24 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
 
   // ---- the frame ------------------------------------------------------------------------------------
   function draw() {
+    try {
+      renderFrame();
+    } catch (err) {
+      // show the failure instead of a silently blank map (reported once per message)
+      const msg = err instanceof Error ? err.message : String(err);
+      if (S.current.drawError !== msg) {
+        S.current.drawError = msg;
+        console.error("[code map] drawing failed", err);
+        setLayout({ state: "error", message: `drawing failed: ${msg}` });
+      }
+    }
+  }
+
+  function renderFrame() {
     const s = S.current;
     const canvas = canvasRef.current;
     const model = s.model;
-    if (!canvas || !model) return;
+    if (!canvas || !model || !s.homed) return; // nothing sensible to draw before the camera is placed
     const ctx = canvas.getContext("2d")!;
 
     // ease the drawn view toward d3's target (zoom in log space so it feels even)
@@ -258,8 +274,19 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
   }
 
   function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+    const rr = Math.max(0, Math.min(r, w / 2, h / 2));
     ctx.beginPath();
-    ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, w / 2, h / 2)));
+    if (typeof ctx.roundRect === "function") {
+      ctx.roundRect(x, y, w, h, rr);
+      return;
+    }
+    // older browsers: same shape from arcs
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
   }
 
   function drawFrame(ctx: CanvasRenderingContext2D, st: NodeState, alpha: number) {
@@ -661,9 +688,28 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
     );
   }
 
-  const api = useRef({ zoomTo, zoomToPath, homeTransform, fly, draw, pick, requestDraw });
+  /** Put the camera on the overview. Waits until the canvas has a real size: fitting into a 0×0 box would
+   *  give zoom 0 and a map that never appears. */
+  function goHome() {
+    const s = S.current;
+    const canvas = canvasRef.current;
+    if (!s.model || !canvas || !s.zoom || s.w < 2 || s.h < 2) return;
+    const home = homeTransform();
+    if (!home || !Number.isFinite(home.k) || home.k <= 0) return;
+    s.homeK = home.k;
+    s.zoom.scaleExtent([home.k * 0.5, MAX_ZOOM]);
+    s.zoom.transform(select(canvas), home);
+    s.view = { k: home.k, x: home.x, y: home.y };
+    s.homed = true;
+    if (s.selected && s.model.nodes.has(s.selected)) {
+      const id = s.selected;
+      setTimeout(() => api.current.zoomTo(id), 120);
+    }
+  }
+
+  const api = useRef({ zoomTo, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome });
   useEffect(() => {
-    api.current = { zoomTo, zoomToPath, homeTransform, fly, draw, pick, requestDraw };
+    api.current = { zoomTo, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome };
   });
 
   // ---- set up canvas, input and resize once ------------------------------------------------------------
@@ -681,6 +727,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
       canvas.height = Math.round(r.height * s.dpr);
       canvas.style.width = `${r.width}px`;
       canvas.style.height = `${r.height}px`;
+      if (!s.homed) api.current.goHome();
       api.current.requestDraw();
     };
     const ro = new ResizeObserver(resize);
@@ -784,17 +831,11 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
     const apply = (pos: Parameters<typeof buildMapModel>[1]) => {
       if (seq !== s.seq) return;
       s.model = buildMapModel(view, pos);
+      s.drawError = "";
       setLayout({ state: "idle" });
-      const home = api.current.homeTransform();
-      const canvas = canvasRef.current;
-      if (home && canvas && s.zoom) {
-        s.homeK = home.k;
-        s.zoom.scaleExtent([home.k * 0.5, MAX_ZOOM]);
-        s.zoom.transform(select(canvas), home);
-        s.view = { k: home.k, x: home.x, y: home.y };
-      }
+      s.homed = false;
+      api.current.goHome(); // or on the first resize with a real size
       api.current.requestDraw();
-      if (s.selected && s.model.nodes.has(s.selected)) setTimeout(() => api.current.zoomTo(s.selected!), 120);
     };
     const cached = cachedLayout(key);
     if (cached) {
@@ -804,7 +845,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
     setLayout({ state: "running", items: view.nodes.length });
     computeLayout(view, key).then(apply, (err: Error) => {
       if (seq !== s.seq || err.message === "superseded") return;
-      setLayout({ state: "error", message: err.message });
+      setLayout({ state: "error", message: `layout failed: ${err.message}` });
     });
   }, [graph]);
 
@@ -826,7 +867,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
         </div>
       )}
       {layout.state === "error" && (
-        <div className="absolute top-3 right-3 z-10 chip text-danger border-danger/40">layout failed: {layout.message}</div>
+        <div className="absolute top-3 right-3 z-10 chip text-danger border-danger/40">{layout.message}</div>
       )}
     </div>
   );
