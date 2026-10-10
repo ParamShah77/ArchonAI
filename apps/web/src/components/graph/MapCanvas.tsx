@@ -188,6 +188,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
     const canvas = canvasRef.current;
     const model = s.model;
     if (!canvas || !model || !s.homed) return; // nothing sensible to draw before the camera is placed
+    if (!fitCanvas()) return; // also catches size changes a ResizeObserver missed
     const ctx = canvas.getContext("2d")!;
 
     // ease the drawn view toward d3's target (zoom in log space so it feels even)
@@ -690,10 +691,31 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
 
   /** Put the camera on the overview. Waits until the canvas has a real size: fitting into a 0×0 box would
    *  give zoom 0 and a map that never appears. */
+  /** Size the canvas to its container. Measured directly (not only via ResizeObserver, which stays silent
+   *  while a tab is hidden and for some first layouts). Returns whether there is room to draw. */
+  function fitCanvas(): boolean {
+    const s = S.current;
+    const canvas = canvasRef.current;
+    const wrap = wrapRef.current;
+    if (!canvas || !wrap) return false;
+    const r = wrap.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    if (r.width !== s.w || r.height !== s.h || dpr !== s.dpr) {
+      s.dpr = dpr;
+      s.w = r.width;
+      s.h = r.height;
+      canvas.width = Math.round(r.width * dpr);
+      canvas.height = Math.round(r.height * dpr);
+      canvas.style.width = `${r.width}px`;
+      canvas.style.height = `${r.height}px`;
+    }
+    return s.w >= 2 && s.h >= 2;
+  }
+
   function goHome() {
     const s = S.current;
     const canvas = canvasRef.current;
-    if (!s.model || !canvas || !s.zoom || s.w < 2 || s.h < 2) return;
+    if (!s.model || !canvas || !s.zoom || !fitCanvas()) return;
     const home = homeTransform();
     if (!home || !Number.isFinite(home.k) || home.k <= 0) return;
     s.homeK = home.k;
@@ -707,9 +729,9 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
     }
   }
 
-  const api = useRef({ zoomTo, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome });
+  const api = useRef({ zoomTo, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome, fitCanvas });
   useEffect(() => {
-    api.current = { zoomTo, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome };
+    api.current = { zoomTo, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome, fitCanvas };
   });
 
   // ---- set up canvas, input and resize once ------------------------------------------------------------
@@ -719,19 +741,13 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
     const s = S.current;
 
     const resize = () => {
-      const r = wrap.getBoundingClientRect();
-      s.dpr = window.devicePixelRatio || 1;
-      s.w = r.width;
-      s.h = r.height;
-      canvas.width = Math.round(r.width * s.dpr);
-      canvas.height = Math.round(r.height * s.dpr);
-      canvas.style.width = `${r.width}px`;
-      canvas.style.height = `${r.height}px`;
+      api.current.fitCanvas();
       if (!s.homed) api.current.goHome();
       api.current.requestDraw();
     };
     const ro = new ResizeObserver(resize);
     ro.observe(wrap);
+    window.addEventListener("resize", resize);
     resize();
 
     const z = d3zoom<HTMLCanvasElement, unknown>()
@@ -812,6 +828,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
 
     return () => {
       ro.disconnect();
+      window.removeEventListener("resize", resize);
       sel.on(".zoom", null);
       canvas.removeEventListener("mousemove", onMove);
       canvas.removeEventListener("mouseleave", onLeave);
@@ -834,8 +851,14 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
       s.drawError = "";
       setLayout({ state: "idle" });
       s.homed = false;
-      api.current.goHome(); // or on the first resize with a real size
-      api.current.requestDraw();
+      // place the camera now, or as soon as the container has a size (checked directly, a few times a second)
+      const place = () => {
+        if (seq !== s.seq || s.homed) return;
+        api.current.goHome();
+        if (s.homed) api.current.requestDraw();
+        else setTimeout(place, 250);
+      };
+      place();
     };
     const cached = cachedLayout(key);
     if (cached) {
