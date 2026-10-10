@@ -8,8 +8,8 @@ COPY pyproject.toml ./
 COPY archon ./archon
 RUN pip install .
 
-ENV ARCHON_API_HOST=0.0.0.0 ARCHON_API_PORT=8000 ARCHON_WORKSPACE=/data/workspace \
+ENV ARCHON_API_HOST=0.0.0.0 ARCHON_API_PORT=8001 ARCHON_WORKSPACE=/data/workspace \
     DATABASE_URL=sqlite+aiosqlite:////data/archon.db
 VOLUME ["/data"]
-EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "archon.main:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8001
+CMD ["python", "-m", "uvicorn", "archon.main:app", "--host", "0.0.0.0", "--port", "8001"]

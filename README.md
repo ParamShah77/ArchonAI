@@ -25,12 +25,12 @@ Prerequisites: Python 3.12+, Node 20+, git. Docker is optional (Postgres).
 ```bash
 cp .env.example .env            # add GEMINI_API_KEY (free: https://aistudio.google.com/apikey)
 
-# API  → http://127.0.0.1:8000  (docs at /docs)
+# API  → http://127.0.0.1:8001  (docs at /docs)
 cd apps/api
 python -m venv .venv && .venv/Scripts/pip install -e ".[dev]"     # Windows; use .venv/bin on Unix
-.venv/Scripts/python -m uvicorn archon.main:app --reload
+.venv/Scripts/python -m uvicorn archon.main:app --port 8001 --reload
 
-# Web  → http://localhost:3000
+# Web  → http://localhost:3001
 cd apps/web
 npm install && npm run dev
 ```
@@ -48,7 +48,7 @@ deterministic offline provider used by the tests.
 
 ```bash
 cp .env.example .env
-docker compose --profile app up -d --build     # Postgres + API (:8000) + web (:3000)
+docker compose --profile app up -d --build     # Postgres + API (:8001) + web (:3001)
 ```
 Set `ARCHON_API_KEY` in `.env` (and `NEXT_PUBLIC_ARCHON_API_KEY` as a build arg for the web image)
 to require `X-API-Key` on the API.
@@ -61,7 +61,7 @@ apps/web      Next.js frontend: repositories, overview, interactive code map
 scripts/      quiz_gate.py (process rule 3)
 decisions.md  decision log — why things are the way they are
 flow.md       execution flow + per-session changelog
-CLAUDE.md     working rules for the AI assistant
+
 ```
 
 ## Tests

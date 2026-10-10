@@ -33,3 +33,7 @@ workspace/
 Thumbs.db
 .idea/
 .vscode/
+
+# AI assistant config (kept local)
+CLAUDE.md
+.claude/

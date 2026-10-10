@@ -28,9 +28,9 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://archon:archon@postgres:5432/archon
       ARCHON_WORKSPACE: /data/workspace
-      ARCHON_CORS_ORIGINS: http://localhost:3000
+      ARCHON_CORS_ORIGINS: http://localhost:3001,http://127.0.0.1:3001
     ports:
-      - "8000:8000"
+      - "8001:8001"
     volumes:
       - archon_data:/data
     depends_on:
@@ -42,10 +42,10 @@ services:
     build:
       context: ./apps/web
       args:
-        NEXT_PUBLIC_ARCHON_API_URL: http://localhost:8000
+        NEXT_PUBLIC_ARCHON_API_URL: http://localhost:8001
     container_name: archon-web
     ports:
-      - "3000:3000"
+      - "3001:3001"
     depends_on:
       - api
 

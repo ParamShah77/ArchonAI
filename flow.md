@@ -13,7 +13,7 @@ each session.
 | Web app | `apps/web/app/layout.tsx` → route pages | Rendered UI, calls API |
 | Quiz gate | `scripts/quiz_gate.py` | `.archon/quiz-pass.json` marker |
 | Hook (disabled, D-011) | `.claude/settings.json` → `scripts/quiz_gate.py check` | allow / block a Bash command |
-| Docker | `apps/api/Dockerfile`, `apps/web/Dockerfile`, `docker-compose.yml --profile app` | containers on :8000 / :3000 |
+| Docker | `apps/api/Dockerfile`, `apps/web/Dockerfile`, `docker-compose.yml --profile app` | containers on :8001 / :3001 |
 
 ## 2. API request lifecycle
 
@@ -202,6 +202,18 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-07 — Silence extension-caused hydration warning
+- Owner's console showed a hydration mismatch on `<html>` caused by browser extensions adding attributes before React loads (`data-qb-installed`, `suppresshydrationwarning`), alongside unrelated errors from the Lusha extension (`dashboard-services.lusha.com` 401, CSP blocks, Stripe.js).
+- `apps/web/src/app/layout.tsx` `RootLayout`: `suppressHydrationWarning` on `<html>` (one level only; mismatches inside the page still warn). No flow change.
+
+### Session 2026-10-07 — Change Web port from 3000 to 3001
+- Changed default web frontend port from 3000 to 3001 to resolve port collisions with other local projects.
+- Updated `apps/web/package.json` (`next dev -p 3001`, `next start -p 3001`), `apps/web/Dockerfile` (`EXPOSE 3001`), `.env` / `.env.example` (`ARCHON_CORS_ORIGINS`), `apps/api/archon/config.py` (`archon_cors_origins`), `.claude/launch.json` (web port & url), `docker-compose.yml` (web port & CORS), `README.md`, `apps/web/README.md`, and `flow.md`.
+
+### Session 2026-10-07 — Change API port from 8000 to 8001
+- Changed default API server port from 8000 to 8001 across backend, frontend, environment configs, docker configuration, launch configuration, and documentation.
+- Files updated: `.env`, `.env.example`, `apps/web/.env.local`, `apps/api/archon/config.py` (`archon_api_port`), `apps/web/src/lib/api.ts` (`API_URL`), `.claude/launch.json`, `docker-compose.yml`, `apps/api/Dockerfile`, `apps/web/Dockerfile`, `README.md`, `CLAUDE.md`, `apps/web/README.md`, `flow.md`.
 
 ### Session 2026-10-06 (evening) — Code Map: smooth canvas renderer
 - Owner found the map basic and stuttering and asked about tools like three.js. Replaced the Cytoscape renderer with d3-zoom + a custom Canvas2D renderer (decision D-026, which explains why not three.js).

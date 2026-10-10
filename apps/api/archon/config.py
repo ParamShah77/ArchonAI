@@ -44,8 +44,8 @@ class Settings(BaseSettings):
     # API
     archon_api_key: str = ""  # when set, every request (except /health and the OpenAPI docs) needs X-API-Key
     archon_api_host: str = "127.0.0.1"
-    archon_api_port: int = 8000
-    archon_cors_origins: str = "http://localhost:3000"
+    archon_api_port: int = 8001
+    archon_cors_origins: str = "http://localhost:3001,http://127.0.0.1:3001"
 
     @property
     def cors_origins(self) -> list[str]:

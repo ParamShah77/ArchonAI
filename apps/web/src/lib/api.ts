@@ -3,7 +3,7 @@
  * The base URL comes from NEXT_PUBLIC_ARCHON_API_URL (apps/web/.env.local) and
  * falls back to the API's default bind address.
  */
-export const API_URL = process.env.NEXT_PUBLIC_ARCHON_API_URL ?? "http://127.0.0.1:8000";
+export const API_URL = process.env.NEXT_PUBLIC_ARCHON_API_URL ?? "http://127.0.0.1:8001";
 const API_KEY = process.env.NEXT_PUBLIC_ARCHON_API_KEY ?? "";
 
 export type RepoStatus = "pending" | "ingesting" | "ready" | "failed";
