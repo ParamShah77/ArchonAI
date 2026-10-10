@@ -91,7 +91,8 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
     w: 0,
     h: 0,
     dpr: 1,
-    frame: 0 as number,
+    frame: 0 as number, // pending frame id (0 = none)
+    frameByTimer: false, // pending frame was scheduled with setTimeout (hidden tab), not requestAnimationFrame
     states: new Map<string, NodeState>(),
     hover: null as string | null,
     selected: null as string | null,
@@ -124,7 +125,8 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
       s.frame = 0;
       draw();
     };
-    s.frame = document.visibilityState === "visible" ? requestAnimationFrame(run) : (setTimeout(run, 0) as unknown as number);
+    s.frameByTimer = document.visibilityState !== "visible";
+    s.frame = s.frameByTimer ? (setTimeout(run, 0) as unknown as number) : requestAnimationFrame(run);
   }
 
   // ---- geometry helpers ----------------------------------------------------------------------------
@@ -835,7 +837,13 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady }: Prop
       canvas.removeEventListener("mousedown", onDown);
       canvas.removeEventListener("click", onClick);
       canvas.removeEventListener("dblclick", onDbl);
-      if (s.frame) cancelAnimationFrame(s.frame);
+      // cancel the pending frame AND forget it: a stale id would make requestDraw() think a frame is still
+      // queued and never draw again (React remounts effects in development, so this path runs on every load)
+      if (s.frame) {
+        if (s.frameByTimer) clearTimeout(s.frame);
+        else cancelAnimationFrame(s.frame);
+        s.frame = 0;
+      }
     };
   }, []);
 
