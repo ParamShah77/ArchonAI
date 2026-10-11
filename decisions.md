@@ -425,3 +425,63 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
   - `git -C`: still uses discovery, so it does not prevent walking up.
 - **Why this one:** two independent guards (git cannot look up, and nothing mutates unless the top level is the clone folder) make the destructive path impossible, while keeping fast in-place refreshes.
 - **Consequences:** re-indexing cloned repos works on Windows. Any future git command in workspace clones must go through `_git(..., ceiling=)`. Python package imports now point at the real modules, so `__init__.py` files stop collecting arrows.
+
+## D-031 — Code map, tier 3: Health lens, hover cards, touchable lines, next-step actions, structure order, quiet hubs, a fast canvas, a test safety net
+- **Date:** 2026-10-12
+- **Status:** Accepted (completes `docs/code-map-plan.md`; amends D-029's layout order and D-026's per-frame merge)
+- **Context:** The owner asked to "finish" the plan. Tier 3 and the critic's remaining gaps covered: a Health view, richer facts, lines you can inspect, actions from a node, an order that follows the code's structure, calmer dense files, a crisper and faster canvas, keeping your place, opening the code, and a safety net for a renderer that had broken three times.
+- **Decision:**
+  - **Health lens** (toolbar `Structure | Health`):
+    - Open findings are loaded only when the lens is on.
+    - Each node's findings weight (severity × confidence) is rolled up to its folders and divided by KLOC, then placed in five bins: <2, 2–5, 5–8, 8–11, ≥11 per 1,000 lines.
+    - Tiles blend over about 350 ms into an OKLCH scale from slate through apricot to rose (chroma ≤ 0.09, no glow). Tiles show a findings mark; symbols get a soft ring.
+    - Test code is excluded. The key shows the scale, or "run an analysis on the Audit tab".
+  - **Hover cards:** they appear after a 250 ms rest. They show kind, path, size, lines, "imported by N files · imports M" (files) or "used by / uses" (symbols), "a test imports it", findings and the signature, in at most 6 rows. Facts are computed once per model.
+  - **Lines you can touch:**
+    - Hovering a line shows "A → B · n relationships · kinds · e.g. x → y"; clicking it flies to both ends.
+    - Selection lines leaving the screen end in tags like "→ graph · 2" (merged, at most 6 plus "+N more"); clicking a tag flies to both ends and pings.
+  - **Actions** (`nodeActions.ts`, shared by the right-click menu and the details panel):
+    - Change impact, Generate tests (functions), Refactoring ideas: links to the Tools page.
+    - Ask Chat: `?q=` prefills the question without sending it.
+    - Copy path.
+    - Open in VS Code (`vscode://file/…:line`) for local repositories, or on GitHub at the indexed commit.
+    - Shift + right-click keeps the browser's menu.
+    - The highlighted search result gets a preview ring and ping without moving the camera.
+    - The details panel adds Facts, Findings and "Imported by tests" (tests-intel), and its relationship headings use the map's direction colours.
+  - **Structure order:**
+    - Inside a folder, boxes are ranked by dependency: users before what they use, longest path over relationships lifted to siblings, cycles broken by path.
+    - Tiers: product code, then tests, then the Packages and Other-files groups (also at the top level).
+    - Test code is drawn at half chroma.
+    - Packages are sorted by ecosystem, then product / dev / fixture, then most used. Dev and fixture packages are outline-only.
+    - Nested functions sort after their parent and are drawn 85% high.
+    - ORM tables sit in their file, not inside the model class.
+    - Empty marker files (no symbols, no relationships, ≤3 lines) are hidden.
+    - Files mixing classes and functions also get call-flow layers for their functions. Across ArchonAI, call lines pointing down went 283 → 479 and pointing up 173 → 29.
+  - **Calmer dense files:**
+    - A hub (called from at least max(5, 30%) of its file's symbols, at most 2 per box) gets quiet incoming lines and a count bubble.
+    - Lines meeting one side of a tile or chip are spread over the middle 70% of that side, at least 6 px apart, ordered by destination.
+    - Bundled exits were left out (see alternatives).
+  - **Crisp and fast:**
+    - The canvas context is opaque, and the background is painted at once after a resize.
+    - At rest, box edges snap to device pixels and 1 px borders sit on half pixels.
+    - Grid dots are 2×2 device pixels drawn as one path (about 3× faster than a fillRect per dot).
+    - The per-frame line merge works on integer arrays built once with the model (`eSrc` / `eTgt` / `eKind` / `eExt`, ancestor chains, numeric pair keys). It produces exactly the same pairs (verified 59/59, identical weights), and the merge's JavaScript time fell from about 3 ms to well under 1 ms per frame. Frames are now about 1 ms p50 at rest on ArchonAI.
+  - **Keep your place:** the whole-graph payload is cached per repository and version while you visit other tabs. The camera is saved per repository in sessionStorage (after user moves and landed flights) and restored when the layout key matches.
+  - **Safety net:** Vitest (`npm test`) covers:
+    - view-model rules;
+    - layout (no sibling overlaps; callers above or beside callees, also next to classes);
+    - model arrays and file facts;
+    - palette contrast (every text ≥ 4.5:1 on every surface, closed tile ≥ 1.4× its surface, chips ≥ 7:1);
+    - text fitting.
+- **Alternatives considered:**
+  - Bundled exits through parent ports: kept out; the plan marked it optional, and the spread ports plus the budget already removed the pile-ups.
+  - A pattern-filled dot grid: about 0 ms, but integer tile sizes make the dots drift and jump while zooming.
+  - Loading findings always: an extra request on every map visit for a view most visits do not use.
+  - A minimap and always-on badges: rejected earlier as clutter.
+  - Jest instead of Vitest: Vitest runs TS/ESM directly with the same config style as the app.
+- **Why this one:** each item answers a concrete gap from the review or the critic while keeping the calm look. The performance work makes the extra features free (frames got faster, not slower).
+- **Consequences:**
+  - New dev dependency `vitest`.
+  - The Health colours depend on a recent analysis run (re-indexing clears findings until the next run).
+  - The layout cache key bumped to v5.
+  - Moving the map to the right of the screen when a node is selected under the panel remains handled by `ensureVisible`.

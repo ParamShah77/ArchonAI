@@ -78,26 +78,32 @@ apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /
   /repos/[id]                          layout.tsx awaits params -> <RepoShell id>
                                          RepoShell: GET /repos/{id} (polls while not ready), provides RepoContext, tabs
                                          page.tsx -> <RepoOverview/>: stats from repo row, GET /repos/{id}/architecture
-  /repos/[id]/map                      page.tsx -> <GraphExplorer/>  (semantic zoom D-024; renderer D-026, D-027, D-029)
-                                         GET /repos/{id}/graph?level=all  (whole hierarchy, once)
+  /repos/[id]/map                      page.tsx -> <GraphExplorer/>  (semantic zoom D-024; renderer D-026, D-027, D-029, D-031)
+                                         GET /repos/{id}/graph?level=all  (whole hierarchy, once; cached per repo
+                                            version while you visit other tabs)
                                          -> <MapCanvas/>: viewModel.buildView() (nesting; wrapper and single-file
-                                            folders dissolved; "Other files" groups; packages box; short method
-                                            names; symbol details) -> worker layoutCore.runLayout(nodes, edges with
-                                            kinds): call-flow layers / left-aligned columns / screen-shaped rows ->
-                                            rectangles -> mapModel.buildMapModel() (tree, areas, OKLCH palettes,
-                                            ranked summaries, dominant root) -> onKey() -> <MapLegend/>; goHome()
-                                         d3-zoom (wheel / pinch / drag), keys (wrapper keydown), <MapControls/> ->
-                                            target transform -> requestDraw()
-                                         renderFrame(): glide -> openness (vs the visible rect; settles at rest)
-                                            -> emphasis easing -> frame fills + header strips -> resting lines
-                                            (buildCurves: stand-ins, budget, edge fade, routing at rest) -> box
-                                            bodies -> chips / cards -> sockets -> labels -> selection veil + its
-                                            world redrawn -> focused lines (direction colours) -> glint -> rings ->
-                                            landing pulse -> breadcrumb -> hover re-pick
-                                         click -> pick() (tiles, chips, title bands) -> ring now, onSelect after
-                                            220 ms -> panel slides over the map; ensureVisible(); <NodePanel/>
-                                         dblclick -> onDoubleClick(): into tile / ping chip / step out; search
-                                            Enter -> zoomTo(id, {pulse: 2}); Esc clears; / focuses search
+                                            folders dissolved; "Other files"; empty marker files hidden; packages box;
+                                            tiers; symbol details) -> worker layoutCore.runLayout(nodes, edges with
+                                            kinds): dependency-ranked boxes, call-flow layers, aligned columns ->
+                                            rectangles -> mapModel.buildMapModel() (areas, OKLCH palettes, summaries,
+                                            facts: fan-in/out, tested-by, hubs; integer edge arrays) -> onKey() ->
+                                            <MapLegend/>; goHome() (or the camera saved in sessionStorage)
+                                         lens = Health -> GET /repos/{id}/findings?status=open&limit=2000 ->
+                                            computeHealth() (weight per KLOC -> 5 bins) -> tiles blend to the scale
+                                         d3-zoom (wheel / pinch / drag), keys, <MapControls/> -> target -> requestDraw()
+                                         renderFrame(): glide -> openness (settles at rest) -> emphasis + lens easing
+                                            -> frame fills + strips -> resting lines (integer merge, budget, edge
+                                            fade, routing at rest, spread ports, quiet hubs) -> box bodies (Health
+                                            colours, findings marks) -> chips / cards (hub bubbles, Health rings) ->
+                                            sockets -> labels -> selection veil + its world -> focused lines -> hovered
+                                            line -> glint -> rings / preview ring -> landing pulse -> edge tags ->
+                                            breadcrumb -> hover re-pick
+                                         pointer: rest 250 ms -> hover card (node facts, or a line's contents);
+                                            click: tag -> flyToPair; line -> flyToPair; node -> ring now, panel after
+                                            220 ms; right-click -> <NodeMenu/> -> zoom / inspect / onAction
+                                         onAction / panel buttons -> nodeActions.runAction(): Tools page, Chat ?q=,
+                                            copy path, VS Code / GitHub
+                                         zoom end / landed flight -> saveCamera() (sessionStorage per repo)
                                          ?node=, ?focus= -> zoomTo; ?prefix= -> zoomToPath; ?debug=map overlay
 ```
 Data hook: `src/lib/hooks.ts::useApi(key, fetcher, {pollMs, pollWhile})` — refetches when `key` changes;
@@ -208,6 +214,29 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-12 (later) — Code Map tier 3 (decision D-031)
+- `MapCanvas.tsx`:
+  - Health: `computeHealth`, `healthTile`, the lens easing (`lensT`), findings marks and rings;
+  - hover cards: `TipRows` / `EdgeRows` with a 250 ms dwell;
+  - lines: `pickEdge`, `drawTags`, `flyToPair`, `spreadPorts`, quiet hubs and bubbles;
+  - right-click `NodeMenu`, `preview()`;
+  - speed: integer-array merge in `buildCurves`, pixel snapping at rest (`toScreen`), opaque context with the background painted on resize, one-path grid;
+  - `saveCamera` and camera restore in `goHome`.
+- `mapModel.ts`: facts (`fanIn`, `fanOut`, `testedBy`), hubs (`hubIn`), `index`, `test` / `muted` / `inner`, integer arrays (`byIndex`, `chain`, `eSrc`, `eTgt`, `eKind`, `eExt`). Summaries skip nested functions.
+- `palette.ts`: test chroma, muted chips, `HEALTH_BINS` / `HEALTH_TILES` / `HEALTH_LABELS`.
+- `viewModel.ts`: `TEST_PATH_RE`, tiers, package order and muting, nested functions, tables in files, empty marker files hidden.
+- `layoutCore.ts`: `rankChildren` (dependency order), `sortKids` tiers, call-flow layers for the functions of mixed files, sibling edges lifted per box. `layoutClient.ts`: `tier` / `path` sent, `LAYOUT_VERSION` 5.
+- New `nodeActions.ts` (`editorHref`, `actionHref`, `runAction`) and `map.css` (menu keyframe).
+- `NodePanel.tsx`: action buttons, Facts, Findings, Imported by tests, direction colours.
+- `GraphExplorer.tsx`: lens toggle, findings fetch, Health key, `onAction`, graph cache, camera `storageKey`, search preview.
+- `ChatPanel.tsx`: `?q=` prefill. `lib/api.ts`: findings `limit`.
+- Tests: Vitest (`vitest.config.ts`, `map.test.ts`, 12 tests, `npm test`).
+- Verified at 1362×928 (simulated visible tab):
+  - Health lens (260 findings, 299 nodes coloured), hover card after the dwell, right-click menu and Esc, 6 edge tags and tag flight, line hover card, search preview ring;
+  - details panel actions and sections, Chat prefill (not sent), camera restored after visiting Chat, hub bubbles, muted dev packages;
+  - merge validated 59/59 pairs identical; frames about 1 ms p50 at rest;
+  - lint, type-check, build, 12 web tests and 40 backend tests pass.
 
 ### Session 2026-10-12 — Workspace safety fix and graph relationships (tier 3, part 1)
 - `apps/api/archon/ingest/workspace.py`:

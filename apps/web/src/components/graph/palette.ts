@@ -87,10 +87,11 @@ export interface BoxPalette {
 
 /** Colours for a box of area `index` at nesting `depth`. The open-surface ramp stops at depth 2, so a closed
  *  tile always stands clearly above the surface it sits on. */
-export function boxPalette(index: number, depth: number, neutral: boolean): BoxPalette {
+export function boxPalette(index: number, depth: number, neutral: boolean, test = false): BoxPalette {
   const H = neutral ? NEUTRAL_H : AREA_HUES[index % AREA_HUES.length];
   const warm = !neutral && H >= 30 && H <= 100;
-  const c = neutral ? 0.25 : warm ? 0.7 : 1; // chroma scale
+  // chroma scale; test code is drawn at half chroma so it does not compete with product code
+  const c = (neutral ? 0.25 : warm ? 0.7 : 1) * (test ? 0.5 : 1);
   const lift = warm ? 0.02 : 0;
   const d = Math.min(depth, 2);
   const frameL = 0.228 + 0.025 * d;
@@ -117,14 +118,30 @@ export interface ChipPalette {
 }
 
 /** A symbol chip in its kind's hue, sitting just above the surface it is on. Private helpers are quieter. */
-export function chipPalette(kindColor: string, surfaceL: number, priv: boolean): ChipPalette {
+export function chipPalette(kindColor: string, surfaceL: number, priv: boolean, muted = false): ChipPalette {
   const [, C, H] = hexToOklch(kindColor);
+  if (muted) {
+    // dev-only or test-fixture package: an outline on the surface, no fill of its own
+    return { fill: oklch(surfaceL + 0.01, 0.005, H), stroke: oklch(0.5, C * 0.4, H), dot: oklch(0.62, C * 0.5, H) };
+  }
   return {
     fill: oklch(surfaceL + (priv ? 0.045 : 0.075), Math.min(C * 0.35, priv ? 0.025 : 0.04), H),
     stroke: oklch(priv ? 0.5 : 0.62, C * (priv ? 0.45 : 0.7), H),
     dot: kindColor,
   };
 }
+
+/** Health lens: findings per 1,000 lines, in five steps from a receding slate to a soft rose (chroma kept at
+ *  or below 0.09 so the map never looks alarming). Bins follow the health score's bands. */
+export const HEALTH_BINS = [2, 5, 8, 11]; // findings weight per KLOC: <2, 2-5, 5-8, 8-11, >=11
+export const HEALTH_LABELS = ["clean", "minor", "some", "many", "needs attention"];
+export const HEALTH_TILES: { top: string; bottom: string; border: string }[] = [
+  [250, 0.012, 0.36],
+  [75, 0.04, 0.41],
+  [55, 0.06, 0.42],
+  [30, 0.075, 0.43],
+  [12, 0.09, 0.44],
+].map(([H, C, L]) => ({ top: oklch(L + 0.03, C, H), bottom: oklch(L - 0.03, C * 0.9, H), border: oklch(L + 0.18, C * 1.1, H) }));
 
 /** Lines of the focused item: what it uses, what uses it, both ways. */
 export const FOCUS_OUT = "#f5d9a8";

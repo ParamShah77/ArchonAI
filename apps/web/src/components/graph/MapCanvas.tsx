@@ -19,11 +19,12 @@ import { pointer, select } from "d3-selection";
 import { zoom as d3zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform } from "d3-zoom";
 import { interpolateZoom } from "d3-interpolate";
 import "d3-transition";
-import { EDGE_STYLE, KIND_STYLE, type EdgeKind, type Graph, type NodeKind } from "@/lib/api";
+import "./map.css";
+import { EDGE_STYLE, KIND_STYLE, type EdgeKind, type Finding, type Graph, type NodeKind } from "@/lib/api";
 import { cachedLayout, computeLayout, viewKey } from "./layoutClient";
 import { buildMapModel, withAlpha, type MapModel, type MapNode } from "./mapModel";
 import { fitParts, fitSmart, fontOf, measure, type FontSpec } from "./mapText";
-import { FOCUS_BOTH, FOCUS_IN, FOCUS_OUT, MAP_BG, MAP_INK, MAP_MUTED, mixOklab } from "./palette";
+import { FOCUS_BOTH, FOCUS_IN, FOCUS_OUT, HEALTH_BINS, HEALTH_TILES, MAP_BG, MAP_INK, MAP_MUTED, MAP_PANEL, mixOklab } from "./palette";
 import { buildView, CHIP_H, isSynthetic } from "./viewModel";
 
 export interface Crumb {
@@ -38,7 +39,11 @@ export interface MapController {
   upOneLevel: () => void;
   zoomBy: (factor: number) => void;
   fitCurrent: () => void;
+  preview: (id: string | null) => void; // a soft ring + one ping on a node, without moving the camera
 }
+
+/** Actions offered by the right-click menu (and the details panel). */
+export type NodeAction = "impact" | "tests" | "refactor" | "chat" | "copy" | "open";
 
 /** What the legend should explain: only what this map actually draws. */
 export interface MapKey {
@@ -57,6 +62,10 @@ interface Props {
   onKey?: (key: MapKey) => void;
   insetBottom?: number; // px covered by an overlay at the bottom (the key): fits keep content above it
   insetRight?: number; // px covered by the details panel on the right
+  lens?: "structure" | "health"; // Health: tiles coloured by findings per 1,000 lines
+  findings?: Finding[] | null; // open findings (Health lens, hover cards)
+  onAction?: (kind: NodeAction, id: string) => void;
+  storageKey?: string; // remembers the camera per repository for this browser tab
 }
 
 // ---- tuning -----------------------------------------------------------------------------------------
@@ -166,7 +175,22 @@ interface Curve {
   sel: boolean; // touched by the selection (drawn over the veil, glints)
   inA: boolean;
   inB: boolean;
+  n: number; // code-level relationships merged into this line
+  kinds: Map<string, number>;
+  samples: [string, string][]; // a few examples, for the line's tooltip
+  sign: number; // bow side and width (kept when its ends are spread along a side)
+  mul: number;
 }
+
+interface Health {
+  bin: number;
+  count: number;
+  worst: string;
+}
+
+const SEVERITY_W: Record<string, number> = { critical: 10, high: 5, medium: 2, low: 0.7, info: 0.1 };
+const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
+const softSeverity = (sev: string) => (sev === "critical" || sev === "high" ? FOCUS_BOTH : FOCUS_OUT);
 
 interface Obstacle {
   x: number;
@@ -197,11 +221,25 @@ interface Debug {
   k: number;
 }
 
-export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey, insetBottom = 0, insetRight = 0 }: Props) {
+export function MapCanvas({
+  graph,
+  selected,
+  onSelect,
+  onCrumbs,
+  onReady,
+  onKey,
+  insetBottom = 0,
+  insetRight = 0,
+  lens = "structure",
+  findings = null,
+  onAction,
+  storageKey = "",
+}: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [layout, setLayout] = useState<LayoutState>({ state: "idle" });
-  const [tip, setTip] = useState<{ x: number; y: number; node: MapNode } | null>(null);
+  const [tip, setTip] = useState<{ x: number; y: number; node?: MapNode; edge?: Curve } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; node: MapNode } | null>(null);
   const [debug, setDebug] = useState<Debug | null>(null);
   const [focusHint, setFocusHint] = useState(false);
 
@@ -254,11 +292,37 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     insetBottom: 0,
     insetRight: 0,
     atHome: false, // camera still on the overview it was placed at (no user move yet)
+    preview: null as string | null, // search result being looked at (ring, no camera move)
+    lens: "structure" as "structure" | "health",
+    lensT: 0, // eased 0..1 toward the Health colours
+    findings: null as Finding[] | null,
+    health: new Map<string, Health>(),
+    tags: [] as { x: number; y: number; w: number; h: number; a: string; b: string; far: string }[],
+    hoverEdge: null as string | null,
+    atRest: false, // camera and boxes settled: shapes snap to device pixels
+    storageKey: "",
+    layoutKey: "",
+    menuOpen: false,
   });
-  const cb = useRef({ onSelect, onCrumbs, onReady, onKey });
+  const cb = useRef({ onSelect, onCrumbs, onReady, onKey, onAction });
   useEffect(() => {
-    cb.current = { onSelect, onCrumbs, onReady, onKey };
+    cb.current = { onSelect, onCrumbs, onReady, onKey, onAction };
   });
+
+  useEffect(() => {
+    S.current.lens = lens;
+    api.current.requestDraw();
+  }, [lens]);
+
+  useEffect(() => {
+    S.current.findings = findings;
+    api.current.computeHealth();
+    api.current.requestDraw();
+  }, [findings]);
+
+  useEffect(() => {
+    S.current.storageKey = storageKey;
+  }, [storageKey]);
 
   useEffect(() => {
     S.current.insetBottom = insetBottom;
@@ -295,7 +359,16 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
 
   // ---- geometry helpers ----------------------------------------------------------------------------
   function toScreen(v: View, r: MapNode["rect"]) {
-    return { sx: (r.x - r.w / 2) * v.k + v.x, sy: (r.y - r.h / 2) * v.k + v.y, sw: r.w * v.k, sh: r.h * v.k };
+    const sx = (r.x - r.w / 2) * v.k + v.x;
+    const sy = (r.y - r.h / 2) * v.k + v.y;
+    const sw = r.w * v.k;
+    const sh = r.h * v.k;
+    if (!S.current.atRest) return { sx, sy, sw, sh };
+    // at rest, edges land on whole device pixels (and 1 px borders on half pixels): crisp hairlines
+    const d = S.current.dpr;
+    const x1 = Math.round(sx * d) / d, y1 = Math.round(sy * d) / d;
+    const x2 = Math.round((sx + sw) * d) / d, y2 = Math.round((sy + sh) * d) / d;
+    return { sx: x1 + 0.5 / d, sy: y1 + 0.5 / d, sw: x2 - x1 - 1 / d, sh: y2 - y1 - 1 / d };
   }
 
   /** The part of the canvas not covered by overlays (details panel, key). */
@@ -408,6 +481,14 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       v.y = tv.y;
     }
     const scaling = s.flying || now - s.lastScaleAt < SCALE_QUIET_MS || Math.abs(lk - Math.log(tv.k)) > 1e-3;
+    s.atRest = camSettled && !scaling;
+    // Health lens colours ease in and out (about 350 ms)
+    const lensGoal = s.lens === "health" ? 1 : 0;
+    if (s.lensT !== lensGoal) {
+      s.lensT = animate ? s.lensT + (lensGoal - s.lensT) * (1 - Math.exp(-dt / 110)) : lensGoal;
+      if (Math.abs(s.lensT - lensGoal) < 0.01) s.lensT = lensGoal;
+    }
+    const lensMoving = s.lensT !== lensGoal;
 
     ctx.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
     ctx.globalAlpha = 1;
@@ -485,13 +566,18 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     drawLabels();
     // -- pass 6: the selection veils the rest; its world is redrawn on top
     if (s.emphSel > 0.01 && selSt) drawVeil(ctx, selSt, states);
-    // -- pass 7: focused relationships, continuous and on top
+    // -- pass 7: focused relationships, continuous and on top; the line under the pointer too
     for (const c of s.curves) if (c.touched) strokeCurve(ctx, c, true);
+    const hovered = s.hoverEdge ? s.curves.find((c) => c.key === s.hoverEdge) : undefined;
+    if (hovered && !hovered.touched) strokeCurve(ctx, { ...hovered, color: INK_FOCUS, alpha: Math.max(0.85, hovered.alpha), width: hovered.width + 1 }, true);
     if (drawGlint(ctx, now)) pending = true;
     // -- pass 8: rings and the landing pulse
     if (s.selected) drawRing(ctx, s.selected, true, now);
     if (s.hover && s.hover !== s.selected) drawRing(ctx, s.hover, false, now);
+    if (s.preview && s.preview !== s.selected) drawRing(ctx, s.preview, false, now);
     if (drawPulse(ctx, now)) pending = true;
+    drawTags(ctx);
+    if (lensMoving) pending = true;
 
     updateCrumbs(model, states);
     if (moved) refreshHover();
@@ -521,7 +607,13 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       ctx.fillStyle = `rgba(150,165,190,${alpha})`;
       const x0 = ((v.x % px) + px) % px;
       const y0 = ((v.y % px) + px) % px;
-      for (let x = x0; x < S.current.w; x += px) for (let y = y0; y < S.current.h; y += px) ctx.fillRect(Math.round(x) - 0.75, Math.round(y) - 0.75, 1.5, 1.5);
+      // 2×2 device-pixel dots on whole device pixels: crisp at any display scaling, no shimmer while panning
+      const d = S.current.dpr;
+      const sz = 2 / d;
+      // one path, one fill: ~3× faster than a fillRect per dot (thousands of dots per frame)
+      ctx.beginPath();
+      for (let x = x0; x < S.current.w; x += px) for (let y = y0; y < S.current.h; y += px) ctx.rect(Math.round(x * d) / d - sz / 2, Math.round(y * d) / d - sz / 2, sz, sz);
+      ctx.fill();
     }
   }
 
@@ -610,8 +702,9 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
         ctx.shadowOffsetY = Math.min(6, sw * 0.02);
       }
       const g = ctx.createLinearGradient(0, sy, 0, sy + sh);
-      g.addColorStop(0, n.pal.tileTop);
-      g.addColorStop(1, n.pal.tileBottom);
+      const hl = healthTile(n);
+      g.addColorStop(0, hl ? hl.top : n.pal.tileTop);
+      g.addColorStop(1, hl ? hl.bottom : n.pal.tileBottom);
       roundRect(ctx, sx, sy, sw, sh, radius);
       ctx.fillStyle = g;
       ctx.fill();
@@ -658,8 +751,78 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
         ctx.fill();
       }
     }
+    // Health lens: a findings mark (dot + count) in the corner of tiles big enough to hold it
+    const h = S.current.health.get(n.id);
+    if (h && h.count > 0 && S.current.lensT > 0.5 && st.t < 0.3 && sw >= 90 && sh >= 40) {
+      ctx.globalAlpha = st.da * (S.current.lensT - 0.5) * 2 * (1 - e);
+      const label = h.count > 99 ? "99+" : String(h.count);
+      const f = sans(600, 11);
+      const tw = measure(ctx, label, f);
+      const bx = sx + sw - tw - 26, by = sy + 8;
+      roundRect(ctx, bx, by, tw + 18, 16, 8);
+      ctx.fillStyle = "rgba(15,18,24,0.7)";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(bx + 7, by + 8, 3, 0, Math.PI * 2);
+      ctx.fillStyle = softSeverity(h.worst);
+      ctx.fill();
+      ctx.font = fontOf(f);
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = MAP_INK;
+      ctx.fillText(label, bx + 13, by + 8.5);
+    }
     if (st.t < 0.3) queueTileName(ctx, st);
     if (st.t > 0.05) queueFrameTitle(ctx, st);
+  }
+
+  /** Tile colours in the Health lens: blended from the area colours as the lens eases in. */
+  function healthTile(n: MapNode): { top: string; bottom: string } | null {
+    const s = S.current;
+    if (s.lensT <= 0.01 || n.neutral) return null;
+    const bin = s.health.get(n.id)?.bin ?? 0;
+    const t = Math.round(s.lensT * 10) / 10;
+    return { top: mixColor(n.pal.tileTop, HEALTH_TILES[bin].top, t), bottom: mixColor(n.pal.tileBottom, HEALTH_TILES[bin].bottom, t) };
+  }
+
+  /** Findings → per node: count, worst severity, and (for boxes) a bin by weighted findings per 1,000 lines.
+   *  Test code is left out (findings there are about tests, not product health). */
+  function computeHealth() {
+    const s = S.current;
+    const model = s.model;
+    s.health = new Map();
+    if (!model || !s.findings) return;
+    const byPath = new Map<string, MapNode>();
+    for (const n of model.nodes.values()) if (n.kind === "file") byPath.set(n.path, n);
+    const boxes = [...model.nodes.values()].filter((n) => n.box && n.path).sort((a, b) => b.path.length - a.path.length);
+    const weight = new Map<string, number>();
+    const count = new Map<string, number>();
+    const worst = new Map<string, string>();
+    for (const f of s.findings) {
+      const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
+      const target = model.nodes.get(f.node_id) ?? byPath.get(f.path) ?? boxes.find((b) => dir === b.path || dir.startsWith(`${b.path}/`));
+      if (!target || target.test) continue;
+      const w = (SEVERITY_W[f.severity] ?? 0.1) * (f.confidence || 0.7);
+      for (const id of [target.id, ...target.ancestors]) {
+        weight.set(id, (weight.get(id) ?? 0) + w);
+        count.set(id, (count.get(id) ?? 0) + 1);
+        const cur = worst.get(id);
+        if (!cur || SEVERITY_ORDER.indexOf(f.severity) < SEVERITY_ORDER.indexOf(cur)) worst.set(id, f.severity);
+      }
+    }
+    // lines per box: the files inside
+    const lines = new Map<string, number>();
+    for (const n of model.nodes.values()) {
+      if (n.kind !== "file") continue;
+      for (const id of [n.id, ...n.ancestors]) lines.set(id, (lines.get(id) ?? 0) + Math.max(0, n.lines));
+    }
+    for (const n of model.nodes.values()) {
+      const c = count.get(n.id) ?? 0;
+      if (!n.box && !c) continue;
+      const density = (weight.get(n.id) ?? 0) / ((lines.get(n.id) ?? 0) / 1000 + 0.15);
+      const bin = HEALTH_BINS.findIndex((b) => density < b);
+      s.health.set(n.id, { bin: bin < 0 ? HEALTH_BINS.length : bin, count: c, worst: worst.get(n.id) ?? "" });
+    }
   }
 
   /** The closed tile's name (and summary), centred on the part of the tile you can see. Long names shrink a
@@ -815,7 +978,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     const slotY = (r.y - r.h / 2) * v.k + v.y;
     const slotW = r.w * v.k;
     const slotH = r.h * v.k;
-    const ch = Math.min(CHIP_H * v.k, MAX_CHIP);
+    const ch = Math.min(CHIP_H * v.k, MAX_CHIP) * (st.n.inner ? 0.85 : 1);
     const size = clamp(ch * 0.5, 10, 13);
     const textW = measure(ctx, st.n.label, mono(400, size));
     const extra = st.n.isComponent ? size * 2.2 : 0;
@@ -917,6 +1080,33 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       }
     }
     if (g.card > 0.01) drawCard(ctx, st, g, base * g.ca * g.card);
+    // a hub (called from many places in its file) shows how many instead of a fan of arrows
+    if (n.hubIn > 0 && g.ch >= 15 && chipA > 0.3) {
+      const r = 8;
+      const bx = g.x + g.cw - 2, by = g.y + 1;
+      ctx.globalAlpha = chipA;
+      ctx.beginPath();
+      ctx.arc(bx, by, r, 0, Math.PI * 2);
+      ctx.fillStyle = MAP_PANEL;
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = withAlpha(pal.stroke, 0.8);
+      ctx.stroke();
+      ctx.font = fontOf(sans(600, 9));
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = MAP_INK;
+      ctx.fillText(String(n.hubIn), bx, by + 0.5);
+    }
+    // Health lens: a soft ring on symbols with findings
+    const h = s.health.get(n.id);
+    if (h && h.count > 0 && s.lensT > 0.01 && g.ca > 0.5) {
+      ctx.globalAlpha = s.lensT * st.da;
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = softSeverity(h.worst);
+      roundRect(ctx, g.x - 2, g.y - 2, g.cw + 4, g.ch + 4, g.ch / 2 + 2);
+      ctx.stroke();
+    }
   }
 
   /** Deep zoom: the symbol as a small card with its signature, line range and flags. */
@@ -1013,49 +1203,86 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
 
     // Spread each code-level edge over the nodes that currently stand in for its ends. A node stands in
     // with weight vis·(1−t) (visible but not open); weights along an ancestor chain sum to ~1.
-    const standIns = (id: string): [string, number][] => {
-      const n = model.nodes.get(id)!;
-      const out: [string, number][] = [];
-      for (const c of [id, ...n.ancestors]) {
-        const st = states.get(c);
-        if (!st) continue;
-        const w = st.n.box ? st.vis * (1 - st.t) : st.vis;
-        if (w > 0.02) out.push([c, w]);
+    // This runs every frame over every relationship, so it works on integer arrays built once with the model.
+    const NN = model.byIndex.length;
+    const wOf = new Float32Array(NN);
+    for (const st of states.values()) {
+      const w = st.n.box ? st.vis * (1 - st.t) : st.vis;
+      if (w > 0.02) wOf[st.n.index] = w;
+    }
+    const flags = (set: Set<string> | null) => {
+      if (!set) return null;
+      const f = new Uint8Array(NN);
+      for (const id of set) {
+        const n = model.nodes.get(id);
+        if (n) f[n.index] = 1;
       }
-      return out;
+      return f;
     };
-    const cache = new Map<string, [string, number][]>();
-    const ends = (id: string) => {
-      let r = cache.get(id);
-      if (!r) cache.set(id, (r = standIns(id)));
+    const selF = flags(selSet);
+    const hovF = flags(hovSet);
+    const endsCache: (Int32Array | undefined)[] = new Array(NN);
+    const ends = (i: number) => {
+      let r = endsCache[i];
+      if (!r) {
+        const out: number[] = [];
+        for (const j of model.chain[i]) if (wOf[j] > 0) out.push(j);
+        endsCache[i] = r = Int32Array.from(out);
+      }
       return r;
     };
-    type Pair = { a: string; b: string; w: number; n: number; ext: number; out: boolean; inc: boolean; sel: boolean; hov: boolean; kinds: Map<string, number> };
-    const merged = new Map<string, Pair>();
-    for (const e of model.edges) {
-      const sOut = !!selSet && selSet.has(e.source) && !selSet.has(e.target);
-      const sIn = !!selSet && !selSet.has(e.source) && selSet.has(e.target);
-      const hOut = !!hovSet && hovSet.has(e.source) && !hovSet.has(e.target);
-      const hIn = !!hovSet && !hovSet.has(e.source) && hovSet.has(e.target);
-      for (const [a, wa] of ends(e.source)) {
-        for (const [b, wb] of ends(e.target)) {
+    const K = model.kindNames.length;
+    type Acc = { ai: number; bi: number; w: number; n: number; ext: number; out: boolean; inc: boolean; sel: boolean; hov: boolean; kinds: Int32Array; samples: number[] };
+    const acc = new Map<number, Acc>();
+    const { eSrc, eTgt, eKind, eExt } = model;
+    for (let e = 0; e < eSrc.length; e++) {
+      const si = eSrc[e];
+      const ti = eTgt[e];
+      const es = ends(si);
+      if (!es.length) continue;
+      const et = ends(ti);
+      if (!et.length) continue;
+      const sOut = !!selF && selF[si] === 1 && selF[ti] !== 1;
+      const sIn = !!selF && selF[si] !== 1 && selF[ti] === 1;
+      const hOut = !!hovF && hovF[si] === 1 && hovF[ti] !== 1;
+      const hIn = !!hovF && hovF[si] !== 1 && hovF[ti] === 1;
+      for (let x = 0; x < es.length; x++) {
+        const a = es[x];
+        const wa = wOf[a];
+        for (let y = 0; y < et.length; y++) {
+          const b = et[y];
           if (a === b) continue;
-          const key = `${a}>${b}`;
-          let m = merged.get(key);
-          if (!m) merged.set(key, (m = { a, b, w: 0, n: 0, ext: 0, out: false, inc: false, sel: false, hov: false, kinds: new Map() }));
-          m.w += wa * wb;
+          const key = a * NN + b;
+          let m = acc.get(key);
+          if (!m) acc.set(key, (m = { ai: a, bi: b, w: 0, n: 0, ext: 0, out: false, inc: false, sel: false, hov: false, kinds: new Int32Array(K), samples: [] }));
+          m.w += wa * wOf[b];
           m.n += 1;
-          if (e.external) m.ext += 1;
-          m.out ||= sOut || hOut;
-          m.inc ||= sIn || hIn;
-          m.sel ||= sOut || sIn;
-          m.hov ||= hOut || hIn;
-          m.kinds.set(e.kind, (m.kinds.get(e.kind) ?? 0) + 1);
+          m.ext += eExt[e];
+          if (sOut || hOut) m.out = true;
+          if (sIn || hIn) m.inc = true;
+          if (sOut || sIn) m.sel = true;
+          if (hOut || hIn) m.hov = true;
+          m.kinds[eKind[e]]++;
+          if (m.samples.length < 3 && (a !== si || b !== ti)) m.samples.push(e);
         }
       }
     }
+    type Pair = { a: string; b: string; w: number; n: number; ext: number; out: boolean; inc: boolean; sel: boolean; hov: boolean; best: string; src: Acc };
+    const merged: Pair[] = [];
+    for (const m of acc.values()) {
+      let best = 0;
+      for (let k = 1; k < K; k++) if (m.kinds[k] > m.kinds[best]) best = k;
+      merged.push({ a: model.byIndex[m.ai].id, b: model.byIndex[m.bi].id, w: m.w, n: m.n, ext: m.ext, out: m.out, inc: m.inc, sel: m.sel, hov: m.hov, best: model.kindNames[best], src: m });
+    }
+    // only for lines actually drawn: the kind counts and a few examples, for the line's hover card
+    const kindsOf = (m: Pair) => {
+      const out = new Map<string, number>();
+      m.src.kinds.forEach((c, k) => c && out.set(model.kindNames[k], c));
+      return out;
+    };
+    const samplesOf = (m: Pair): [string, string][] => m.src.samples.map((e) => [model.byIndex[eSrc[e]].fullLabel, model.byIndex[eTgt[e]].fullLabel]);
     // at rest only the strongest folder/file links show; the others taper off and appear on focus
-    const boxPairs = [...merged.values()]
+    const boxPairs = merged
       .filter((m) => !m.sel && !m.hov && states.get(m.a)!.n.box && states.get(m.b)!.n.box && m.ext < m.n)
       .sort((x, y) => y.w - x.w);
     const budget = new Map<string, number>();
@@ -1064,7 +1291,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     const obstacles = scaling ? null : buildObstacles(states);
     const curves: Curve[] = [];
     const outside = (p: Anchor) => Math.max(0, -p.cx, p.cx - s.w, -p.cy, p.cy - s.h);
-    for (const m of merged.values()) {
+    for (const m of merged) {
       const sa = states.get(m.a)!;
       const sb = states.get(m.b)!;
       const strength = m.w / m.n; // how much this pair is "the" current view of these relationships
@@ -1075,7 +1302,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       const inA = A.cx > 0 && A.cx < s.w && A.cy > 0 && A.cy < s.h;
       const inB = B.cx > 0 && B.cx < s.w && B.cy > 0 && B.cy < s.h;
       if (!inA && !inB) continue;
-      const kind = [...m.kinds.entries()].sort((x, y) => y[1] - x[1])[0][0] as EdgeKind;
+      const kind = m.best as EdgeKind;
       const bothBoxes = sa.n.box && sb.n.box;
       const rare = RARE_KINDS.has(kind) && !bothBoxes;
       const external = m.ext === m.n;
@@ -1095,6 +1322,12 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
         dash = [1.5, 5];
         alpha *= 0.35;
         width = Math.min(width, 1.5);
+        arrow = false;
+      }
+      if (!touched && local && !sb.n.box && sb.n.hubIn > 0) {
+        // into a hub: quiet, no arrowhead (the hub's bubble says how many)
+        alpha *= 0.35;
+        width = 1;
         arrow = false;
       }
       if (alpha < 0.01) continue;
@@ -1127,11 +1360,176 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
         s.curveChoice.set(key, choice);
       }
       if (!touched && choice.skip) continue;
-      const c = control(p, q, seg, touched ? 1 : choice.sign, touched ? 1 : choice.mul);
-      curves.push({ key, a: sa, b: sb, p, c, q, color, alpha, width, dash, arrow, touched, sel: m.sel, inA, inB });
+      const sign = touched ? 1 : choice.sign;
+      const mul = touched ? 1 : choice.mul;
+      const c = control(p, q, seg, sign, mul);
+      curves.push({ key, a: sa, b: sb, p, c, q, color, alpha, width, dash, arrow, touched, sel: m.sel, inA, inB, n: m.n, kinds: kindsOf(m), samples: samplesOf(m), sign, mul });
     }
     void ctx;
+    spreadPorts(curves);
     return curves;
+  }
+
+  /** Lines meeting one side of a node are spread over the middle 70% of that side (at least 6 px apart),
+   *  ordered by where they go, so several lines into one tile or chip no longer pile onto one point. */
+  function spreadPorts(curves: Curve[]) {
+    type End = { c: Curve; at: "p" | "q"; st: NodeState; side: number; key: number };
+    const groups = new Map<string, End[]>();
+    for (const c of curves) {
+      for (const at of ["p", "q"] as const) {
+        const st = at === "p" ? c.a : c.b;
+        const A = anchor(st);
+        if (A.hw < 8 || A.hh < 6) continue;
+        const pt = c[at];
+        const other = at === "p" ? c.q : c.p;
+        const rx = (pt.x - A.cx) / A.hw;
+        const ry = (pt.y - A.cy) / A.hh;
+        const side = Math.abs(rx) >= Math.abs(ry) ? (rx < 0 ? 0 : 1) : ry < 0 ? 2 : 3; // left, right, top, bottom
+        const g = `${st.n.id}|${side}`;
+        if (!groups.has(g)) groups.set(g, []);
+        groups.get(g)!.push({ c, at, st, side, key: side < 2 ? other.y : other.x });
+      }
+    }
+    const touched = new Set<Curve>();
+    for (const ends of groups.values()) {
+      if (ends.length < 2) continue;
+      ends.sort((x, y) => x.key - y.key);
+      const A = anchor(ends[0].st);
+      const vertical = ends[0].side < 2;
+      const half = (vertical ? A.hh : A.hw) * 0.7;
+      const step = Math.max(6, (2 * half) / ends.length);
+      const span = step * (ends.length - 1);
+      const box = ends[0].st.n.box;
+      const d = box ? Math.min(28, 0.18 * Math.min(ends[0].st.sw, ends[0].st.sh)) : -2; // inside a tile, outside a chip
+      ends.forEach((e, i) => {
+        const off = Math.max(-((vertical ? A.hh : A.hw) - 3), Math.min((vertical ? A.hh : A.hw) - 3, -span / 2 + i * step));
+        const pt =
+          e.side === 0
+            ? { x: A.cx - A.hw + d, y: A.cy + off }
+            : e.side === 1
+              ? { x: A.cx + A.hw - d, y: A.cy + off }
+              : e.side === 2
+                ? { x: A.cx + off, y: A.cy - A.hh + d }
+                : { x: A.cx + off, y: A.cy + A.hh - d };
+        e.c[e.at] = pt;
+        touched.add(e.c);
+      });
+    }
+    for (const c of touched) {
+      const seg = Math.hypot(c.q.x - c.p.x, c.q.y - c.p.y);
+      if (seg > 1) c.c = control(c.p, c.q, seg, c.sign, c.mul);
+    }
+  }
+
+  /** The line under the pointer (lines are thin: within 6 px of any of 16 points along it). */
+  function pickEdge(px: number, py: number): Curve | null {
+    let best: Curve | null = null;
+    let bestD = 6;
+    for (const c of S.current.curves) {
+      if (c.alpha < 0.15 && !c.touched) continue;
+      for (let i = 0; i <= 16; i++) {
+        const t = i / 16;
+        const x = (1 - t) * (1 - t) * c.p.x + 2 * (1 - t) * t * c.c.x + t * t * c.q.x;
+        const y = (1 - t) * (1 - t) * c.p.y + 2 * (1 - t) * t * c.c.y + t * t * c.q.y;
+        const dd = Math.hypot(px - x, py - y);
+        if (dd < bestD) {
+          bestD = dd;
+          best = c;
+        }
+      }
+    }
+    return best;
+  }
+
+  /** Where the selection's lines leave the screen: a small tag naming what is at the other end. Click flies
+   *  there. At most 6 (+ "N more"), merged when close, kept clear of the key. */
+  function drawTags(ctx: CanvasRenderingContext2D) {
+    const s = S.current;
+    s.tags = [];
+    if (!s.selected || s.emphSel < 0.5) return;
+    const vr = visibleRect();
+    const inset = 14;
+    const inside = (pt: Pt) => pt.x > inset && pt.x < vr.w - inset && pt.y > inset && pt.y < vr.h - inset;
+    const at = (c: Curve, t: number): Pt => ({
+      x: (1 - t) * (1 - t) * c.p.x + 2 * (1 - t) * t * c.c.x + t * t * c.q.x,
+      y: (1 - t) * (1 - t) * c.p.y + 2 * (1 - t) * t * c.c.y + t * t * c.q.y,
+    });
+    type Tag = { x: number; y: number; text: string; a: string; b: string; far: string; n: number };
+    const tags: Tag[] = [];
+    for (const c of s.curves) {
+      if (!c.sel) continue;
+      const pIn = inside(c.p), qIn = inside(c.q);
+      if (pIn === qIn) continue;
+      // bisection for the point where the line crosses the inset edge of the visible map
+      let lo = pIn ? 0 : 1, hi = pIn ? 1 : 0;
+      for (let i = 0; i < 18; i++) {
+        const mid = (lo + hi) / 2;
+        if (inside(at(c, mid))) lo = mid;
+        else hi = mid;
+      }
+      const pt = at(c, lo);
+      const far = pIn ? c.b : c.a;
+      const arrow = pIn ? "→" : "←";
+      tags.push({ x: pt.x, y: pt.y, text: `${arrow} ${far.n.label}${c.n > 1 ? ` · ${c.n}` : ""}`, a: c.a.n.id, b: c.b.n.id, far: far.n.id, n: c.n });
+    }
+    if (!tags.length) return;
+    tags.sort((x, y) => y.n - x.n);
+    const kept: Tag[] = [];
+    let more = 0;
+    for (const t of tags) {
+      if (kept.some((k) => Math.hypot(k.x - t.x, k.y - t.y) < 22)) {
+        more++;
+        continue;
+      }
+      if (kept.length >= 6) {
+        more++;
+        continue;
+      }
+      kept.push(t);
+    }
+    const font = sans(600, 11);
+    const draw = (x: number, y: number, text: string, hit?: Tag) => {
+      const label = fitSmart(ctx, text, font, 200);
+      const tw = measure(ctx, label, font);
+      const w = tw + 14, h = 18;
+      const bx = clamp(x - w / 2, 6, vr.w - w - 6);
+      const by = clamp(y - h / 2, 6, vr.h - h - 6);
+      ctx.globalAlpha = 0.95 * s.emphSel;
+      roundRect(ctx, bx, by, w, h, 9);
+      ctx.fillStyle = MAP_PANEL;
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = withAlpha(FOCUS_OUT, 0.5);
+      ctx.stroke();
+      ctx.font = fontOf(font);
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = MAP_INK;
+      ctx.fillText(label, bx + 7, by + h / 2 + 0.5);
+      if (hit) s.tags.push({ x: bx, y: by, w, h, a: hit.a, b: hit.b, far: hit.far });
+    };
+    for (const t of kept) draw(t.x, t.y, t.text, t);
+    if (more > 0) {
+      const last = kept[kept.length - 1];
+      draw(last.x, last.y + 22, `+${more} more`);
+    }
+  }
+
+  /** Fly so both ends of a relationship are in view, then ping the far end. */
+  function flyToPair(a: string, b: string, ping: string) {
+    const m = S.current.model;
+    const na = m?.nodes.get(a), nb = m?.nodes.get(b);
+    if (!na || !nb) return;
+    const r = [na.rect, nb.rect];
+    fly(
+      transformFor(
+        Math.min(...r.map((x) => x.x - x.w / 2)),
+        Math.min(...r.map((x) => x.y - x.h / 2)),
+        Math.max(...r.map((x) => x.x + x.w / 2)),
+        Math.max(...r.map((x) => x.y + x.h / 2)),
+      ),
+      { pulse: { id: ping, count: 1 } },
+    );
   }
 
   function control(p: Pt, q: Pt, seg: number, sign: number, mul: number): Pt {
@@ -1507,7 +1905,10 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       s.glide = true;
       s.flying = false;
       s.lastScaleAt = performance.now();
-      if (landed) startPulse();
+      if (landed) {
+        startPulse();
+        saveCamera();
+      }
       requestDraw();
     };
     sel
@@ -1672,6 +2073,13 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       canvas.height = Math.round(r.height * dpr);
       canvas.style.width = `${r.width}px`;
       canvas.style.height = `${r.height}px`;
+      // resizing clears an opaque canvas to black: paint the background at once
+      const c2 = canvas.getContext("2d");
+      if (c2) {
+        c2.setTransform(1, 0, 0, 1, 0, 0);
+        c2.fillStyle = MAP_BG;
+        c2.fillRect(0, 0, canvas.width, canvas.height);
+      }
       if ((dx || dy) && s.zoom) {
         s.view.x += dx;
         s.view.y += dy;
@@ -1700,10 +2108,24 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       [x1 - mx, y1 - my],
       [x2 + mx, y2 + my],
     ]);
-    s.zoom.transform(select(canvas), home);
-    s.view = { k: home.k, x: home.x, y: home.y };
+    // back on this tab: return to where you were (same map, nothing selected to fly to)
+    let start = home;
+    let restored = false;
+    if (!s.selected && s.storageKey) {
+      try {
+        const saved = JSON.parse(window.sessionStorage.getItem(s.storageKey) ?? "null") as { lk: string; k: number; x: number; y: number; w: number; h: number } | null;
+        if (saved && saved.lk === s.layoutKey && saved.k >= home.k * 0.5 && saved.k <= MAX_ZOOM) {
+          start = zoomIdentity.translate(saved.x + (s.w - saved.w) / 2, saved.y + (s.h - saved.h) / 2).scale(saved.k);
+          restored = true;
+        }
+      } catch {
+        /* storage unavailable: start at the overview */
+      }
+    }
+    s.zoom.transform(select(canvas), start);
+    s.view = { k: start.k, x: start.x, y: start.y };
     s.homed = true;
-    s.atHome = true;
+    s.atHome = !restored;
     api.current.requestDraw();
     if (s.selected && s.model.nodes.has(s.selected)) {
       const id = s.selected;
@@ -1711,9 +2133,27 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     }
   }
 
-  const api = useRef({ zoomTo, upOneLevel, fitCurrent, fitAll, zoomBy, panBy, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome, fitCanvas, ensureVisible, onDoubleClick });
+  function saveCamera() {
+    const s = S.current;
+    if (!s.storageKey || !s.homed) return;
+    try {
+      const t = s.target;
+      window.sessionStorage.setItem(s.storageKey, JSON.stringify({ lk: s.layoutKey, k: t.k, x: t.x, y: t.y, w: s.w, h: s.h }));
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  function preview(id: string | null) {
+    const s = S.current;
+    s.preview = id && s.model?.nodes.has(id) ? id : null;
+    if (s.preview) s.pulse = { id: s.preview, t0: performance.now(), count: 1 };
+    requestDraw();
+  }
+
+  const api = useRef({ zoomTo, upOneLevel, fitCurrent, fitAll, zoomBy, panBy, zoomToPath, homeTransform, fly, draw, pick, pickEdge, requestDraw, goHome, fitCanvas, ensureVisible, onDoubleClick, computeHealth, saveCamera, preview, flyToPair });
   useEffect(() => {
-    api.current = { zoomTo, upOneLevel, fitCurrent, fitAll, zoomBy, panBy, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome, fitCanvas, ensureVisible, onDoubleClick };
+    api.current = { zoomTo, upOneLevel, fitCurrent, fitAll, zoomBy, panBy, zoomToPath, homeTransform, fly, draw, pick, pickEdge, requestDraw, goHome, fitCanvas, ensureVisible, onDoubleClick, computeHealth, saveCamera, preview, flyToPair };
   });
 
   // ---- set up canvas, input and resize once ------------------------------------------------------------
@@ -1721,6 +2161,8 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     const canvas = canvasRef.current!;
     const wrap = wrapRef.current!;
     const s = S.current;
+    // an opaque canvas: the browser can skip blending it with the page (every frame paints the background)
+    canvas.getContext("2d", { alpha: false });
     // draw in the same font as the rest of the app
     const appFont = getComputedStyle(document.body).fontFamily;
     if (appFont) SANS = appFont;
@@ -1751,6 +2193,10 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       .filter((e) => (!e.ctrlKey || e.type === "wheel") && !e.button && e.type !== "dblclick")
       .on("start", (e) => {
         const t = (e.sourceEvent as Event | null)?.type;
+        if (t && s.menuOpen) {
+          s.menuOpen = false;
+          setMenu(null); // wheel or drag closes the menu
+        }
         if (t === "mousedown" || t === "touchstart") {
           s.held = true;
           canvas.style.cursor = "grabbing";
@@ -1774,9 +2220,10 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
         }
         api.current.requestDraw();
       })
-      .on("end", () => {
+      .on("end", (e) => {
         s.held = false;
         canvas.style.cursor = s.hover ? "pointer" : "grab";
+        if (e.sourceEvent) api.current.saveCamera();
         api.current.requestDraw();
       });
     s.zoom = z;
@@ -1787,31 +2234,48 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       const r = canvas.getBoundingClientRect();
       return { x: e.clientX - r.left, y: e.clientY - r.top };
     };
-    const onMove = (e: MouseEvent) => {
-      const p = local(e);
-      s.ptr = p;
-      const hit = api.current.pick(p.x, p.y);
-      const id = hit?.st.n.id ?? null;
-      if (!s.held) canvas.style.cursor = hit ? "pointer" : "grab";
-      if (id !== s.hover || !!hit?.title !== s.hoverTitle) {
-        s.hover = id;
-        s.hoverTitle = !!hit?.title;
-        api.current.requestDraw();
-      }
-      const show = !!hit && !s.held && !hit.title && (!hit.st.n.box || hit.st.nameHidden);
-      if (show) {
-        s.tipShown = true;
-        setTip({ x: p.x, y: p.y, node: hit!.st.n });
-      } else if (s.tipShown) {
+    // hover cards appear after a short rest on the same thing (no flicker while sweeping across the map)
+    let tipTimer = 0;
+    let tipFor = "";
+    const hideTip = () => {
+      window.clearTimeout(tipTimer);
+      tipFor = "";
+      if (s.tipShown) {
         s.tipShown = false;
         setTip(null);
       }
     };
+    const onMove = (e: MouseEvent) => {
+      const p = local(e);
+      s.ptr = p;
+      const tag = s.tags.find((t) => p.x >= t.x && p.x <= t.x + t.w && p.y >= t.y && p.y <= t.y + t.h);
+      const hit = tag ? null : api.current.pick(p.x, p.y);
+      const edge = !hit && !tag && !s.held ? api.current.pickEdge(p.x, p.y) : null;
+      const id = hit?.st.n.id ?? null;
+      if (!s.held) canvas.style.cursor = hit || edge || tag ? "pointer" : "grab";
+      if (id !== s.hover || !!hit?.title !== s.hoverTitle || (edge?.key ?? null) !== s.hoverEdge) {
+        s.hover = id;
+        s.hoverTitle = !!hit?.title;
+        s.hoverEdge = edge?.key ?? null;
+        api.current.requestDraw();
+      }
+      const what = hit && !hit.title ? `n:${hit.st.n.id}` : edge ? `e:${edge.key}` : "";
+      if (what !== tipFor) {
+        hideTip();
+        tipFor = what;
+        if (!what || s.held) return;
+        tipTimer = window.setTimeout(() => {
+          s.tipShown = true;
+          if (hit) setTip({ x: p.x, y: p.y, node: hit.st.n });
+          else if (edge) setTip({ x: p.x, y: p.y, edge });
+        }, 250);
+      }
+    };
     const onLeave = () => {
       s.hover = null;
+      s.hoverEdge = null;
       s.ptr = null;
-      s.tipShown = false;
-      setTip(null);
+      hideTip();
       api.current.requestDraw();
     };
     // d3-zoom swallows mousedown, so a drag is told apart from a click with pointer events
@@ -1819,6 +2283,11 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     const onDown = (e: PointerEvent) => {
       down = { x: e.clientX, y: e.clientY };
       wrap.focus({ preventScroll: true });
+      if (s.menuOpen && e.button === 0) {
+        s.menuOpen = false;
+        setMenu(null);
+      }
+      hideTip();
     };
     // A click selects at once (ring on the map), but tells the page only after a moment, so a double-click
     // can fly without first opening the details panel.
@@ -1826,13 +2295,41 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     const onClick = (e: MouseEvent) => {
       if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return; // that was a drag
       const p = local(e);
+      // an edge tag: fly to both ends of that relationship
+      const tag = s.tags.find((t) => p.x >= t.x && p.x <= t.x + t.w && p.y >= t.y && p.y <= t.y + t.h);
+      if (tag) return api.current.flyToPair(tag.a, tag.b, tag.far);
       const hit = api.current.pick(p.x, p.y);
+      if (!hit) {
+        // a line: fly to both of its ends (the selection stays)
+        const edge = api.current.pickEdge(p.x, p.y);
+        if (edge) return api.current.flyToPair(edge.a.n.id, edge.b.n.id, edge.b.n.id);
+      }
       const id = hit && !isSynthetic(hit.st.n.id) ? hit.st.n.id : null;
       if (id !== s.selected) s.selAt = performance.now();
       s.selected = id;
       api.current.requestDraw();
       window.clearTimeout(clickTimer);
       clickTimer = window.setTimeout(() => cb.current.onSelect(id), 220);
+    };
+    // right-click: a small menu of next steps for that node (Shift + right-click keeps the browser's menu)
+    const onContext = (e: MouseEvent) => {
+      if (e.shiftKey) return;
+      e.preventDefault();
+      const p = local(e);
+      const hit = api.current.pick(p.x, p.y);
+      if (!hit || isSynthetic(hit.st.n.id)) {
+        s.menuOpen = false;
+        setMenu(null);
+        return;
+      }
+      window.clearTimeout(clickTimer);
+      if (hit.st.n.id !== s.selected) s.selAt = performance.now();
+      s.selected = hit.st.n.id;
+      cb.current.onSelect(hit.st.n.id);
+      hideTip();
+      s.menuOpen = true;
+      setMenu({ x: p.x, y: p.y, node: hit.st.n });
+      api.current.requestDraw();
     };
     const onDbl = (e: MouseEvent) => {
       window.clearTimeout(clickTimer);
@@ -1851,6 +2348,11 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
           api.current.upOneLevel();
           break;
         case "Escape":
+          if (s.menuOpen) {
+            s.menuOpen = false;
+            setMenu(null);
+            break;
+          }
           window.clearTimeout(clickTimer);
           s.selected = null;
           cb.current.onSelect(null);
@@ -1903,6 +2405,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     canvas.addEventListener("pointerdown", onDown);
     canvas.addEventListener("click", onClick);
     canvas.addEventListener("dblclick", onDbl);
+    canvas.addEventListener("contextmenu", onContext);
     canvas.addEventListener("contextrestored", onRestored);
     wrap.addEventListener("keydown", onKey);
     document.addEventListener("visibilitychange", onVisible);
@@ -1932,6 +2435,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       upOneLevel: () => api.current.upOneLevel(),
       zoomBy: (f) => api.current.zoomBy(f),
       fitCurrent: () => api.current.fitCurrent(),
+      preview: (id) => api.current.preview(id),
     });
 
     return () => {
@@ -1945,6 +2449,8 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       canvas.removeEventListener("pointerdown", onDown);
       canvas.removeEventListener("click", onClick);
       canvas.removeEventListener("dblclick", onDbl);
+      canvas.removeEventListener("contextmenu", onContext);
+      window.clearTimeout(tipTimer);
       canvas.removeEventListener("contextrestored", onRestored);
       wrap.removeEventListener("keydown", onKey);
       document.removeEventListener("visibilitychange", onVisible);
@@ -1970,10 +2476,12 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       if (seq !== s.seq) return;
       const model = buildMapModel(view, pos);
       s.model = model;
+      s.layoutKey = key;
       s.anim.clear();
       s.subtrees.clear();
       s.curveChoice.clear();
       s.classBorder.clear();
+      api.current.computeHealth();
       s.drawError = "";
       setLayout({ state: "idle" });
       emitKey(model);
@@ -2033,18 +2541,31 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       <canvas ref={canvasRef} className="block touch-none select-none" style={{ cursor: "grab", opacity: 0 }} />
       {tip && (
         <div
-          className="pointer-events-none absolute z-20 rounded-md border border-line px-2.5 py-1.5 text-[11px] shadow-xl"
-          style={{ left: Math.min(tip.x + 14, (S.current.w || 400) - 300), top: tip.y + 16, maxWidth: 300, background: "#151922f2" }}
+          className="pointer-events-none absolute z-20 rounded-md border border-line px-2.5 py-1.5 text-[11px] shadow-xl space-y-0.5"
+          style={{
+            left: Math.max(6, Math.min(tip.x + 14, (S.current.w || 400) - 316)),
+            top: tip.y + 16 + 140 > (S.current.h || 600) ? Math.max(6, tip.y - 140) : tip.y + 16,
+            maxWidth: 310,
+            background: `${MAP_PANEL}f2`,
+          }}
         >
-          <div className="mono text-fg break-all">{tip.node.fullLabel}</div>
-          {tip.node.detail && <div className="mono text-muted break-all">{tip.node.detail}</div>}
-          {tip.node.path && <div className="text-faint truncate">{tip.node.path}</div>}
-          {(tip.node.summary.length > 0 || tip.node.lines > 0) && (
-            <div className="text-muted mt-0.5">
-              {[...tip.node.summary, tip.node.lines > 0 ? `${tip.node.lines} lines` : ""].filter(Boolean).join(" · ")}
-            </div>
-          )}
+          {tip.node && <TipRows node={tip.node} health={S.current.health.get(tip.node.id)} />}
+          {tip.edge && <EdgeRows edge={tip.edge} />}
         </div>
+      )}
+      {menu && (
+        <NodeMenu
+          menu={menu}
+          maxX={(S.current.w || 400) - 220}
+          maxY={(S.current.h || 400) - 300}
+          onPick={(kind) => {
+            S.current.menuOpen = false;
+            setMenu(null);
+            if (kind === "zoom") api.current.zoomTo(menu.node.id, { pulse: 1 });
+            else if (kind === "inspect") cb.current.onSelect(menu.node.id);
+            else cb.current.onAction?.(kind, menu.node.id);
+          }}
+        />
       )}
       {focusHint && (
         <div className="absolute top-3 left-3 z-10 chip pointer-events-none" style={{ background: "#151922e6" }}>
@@ -2067,6 +2588,106 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
           {debug.settled ? "settled" : "moving"} · k {debug.k.toFixed(3)}
         </div>
       )}
+    </div>
+  );
+}
+
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+/** Hover card for a node: at most six short rows of facts. */
+function TipRows({ node, health }: { node: MapNode; health?: Health }) {
+  const rows: React.ReactNode[] = [];
+  const kind = KIND_STYLE[node.kind as NodeKind]?.label ?? (node.kind === "group" ? "Packages" : node.kind === "files" ? "Files" : node.kind);
+  rows.push(
+    <div key="t" className="flex items-baseline gap-2">
+      <span className="mono text-fg break-all">{node.fullLabel}</span>
+      <span className="text-faint shrink-0">{kind}</span>
+    </div>,
+  );
+  if (node.detail) rows.push(<div key="d" className="mono text-muted break-all">{node.detail}</div>);
+  if (node.path) rows.push(<div key="p" className="text-faint truncate">{node.path}</div>);
+  const size = [...node.summary, node.lines > 0 ? `${node.lines} lines` : ""].filter(Boolean).join(" · ");
+  if (size) rows.push(<div key="s" className="text-muted">{size}</div>);
+  if (node.kind === "file" && (node.fanIn || node.fanOut)) {
+    rows.push(
+      <div key="f" className="text-muted">
+        imported by {plural(node.fanIn, "file")} · imports {node.fanOut}
+        {node.testedBy > 0 ? " · a test imports it" : ""}
+      </div>,
+    );
+  } else if (!node.box && (node.fanIn || node.fanOut)) {
+    rows.push(<div key="f" className="text-muted">used by {node.fanIn} · uses {node.fanOut}</div>);
+  }
+  if (health && health.count > 0) {
+    rows.push(
+      <div key="h" className="flex items-center gap-1.5 text-muted">
+        <span className="h-1.5 w-1.5 rounded-full" style={{ background: softSeverity(health.worst) }} />
+        {plural(health.count, "finding")} · worst {health.worst}
+      </div>,
+    );
+  }
+  return <>{rows.slice(0, 6)}</>;
+}
+
+/** Hover card for a line: what it connects and what it is made of. */
+function EdgeRows({ edge }: { edge: Curve }) {
+  const kinds = [...edge.kinds.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${EDGE_STYLE[k as EdgeKind]?.label ?? k}`);
+  return (
+    <>
+      <div className="mono text-fg break-all">
+        {edge.a.n.label} → {edge.b.n.label}
+      </div>
+      <div className="text-muted">
+        {plural(edge.n, "relationship")}
+        {kinds.length > 1 || edge.n > 1 ? ` · ${kinds.join(" · ")}` : ""}
+      </div>
+      {edge.samples[0] && (
+        <div className="mono text-faint break-all">
+          e.g. {edge.samples[0][0]} → {edge.samples[0][1]}
+        </div>
+      )}
+      <div className="text-faint">click to see both ends</div>
+    </>
+  );
+}
+
+/** Right-click menu: next steps for a node. */
+function NodeMenu({
+  menu,
+  maxX,
+  maxY,
+  onPick,
+}: {
+  menu: { x: number; y: number; node: MapNode };
+  maxX: number;
+  maxY: number;
+  onPick: (kind: NodeAction | "zoom" | "inspect") => void;
+}) {
+  const n = menu.node;
+  const callable = n.kind === "function" || n.kind === "method";
+  const items: [NodeAction | "zoom" | "inspect", string][] = [
+    ["inspect", "Inspect"],
+    ["zoom", "Zoom to"],
+    ["impact", "Change impact"],
+    ...(callable ? ([["tests", "Generate tests"]] as [NodeAction, string][]) : []),
+    ["refactor", "Refactoring ideas"],
+    ["chat", "Ask Chat about it"],
+    ["copy", "Copy path"],
+    ["open", "Open in editor"],
+  ];
+  return (
+    <div
+      role="menu"
+      className="absolute z-30 w-52 rounded-lg border border-line py-1 text-xs shadow-2xl animate-[menuIn_120ms_ease-out]"
+      style={{ left: Math.max(6, Math.min(menu.x + 4, maxX)), top: Math.max(6, Math.min(menu.y + 4, maxY)), background: MAP_PANEL }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <div className="px-3 py-1.5 mono text-faint truncate border-b border-line mb-1">{n.fullLabel}</div>
+      {items.map(([k, label]) => (
+        <button key={k} role="menuitem" className="w-full text-left px-3 py-1.5 text-muted hover:text-fg hover:bg-[#1c212c]" onClick={() => onPick(k)}>
+          {label}
+        </button>
+      ))}
     </div>
   );
 }

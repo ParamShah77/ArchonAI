@@ -291,7 +291,7 @@ export const api = {
     analyzers: (id: string) => request<{ name: string; description: string }[]>(`/repos/${id}/analyzers`),
     run: (id: string, analyzers?: string[]) => request<AnalysisRun>(`/repos/${id}/analyze`, { method: "POST", body: JSON.stringify({ analyzers }) }),
     runs: (id: string) => request<AnalysisRun[]>(`/repos/${id}/analysis/runs`),
-    findings: (id: string, p: { analyzer?: string; severity?: string; status?: string; path?: string }) => request<FindingsResponse>(`/repos/${id}/findings${qs(p)}`),
+    findings: (id: string, p: { analyzer?: string; severity?: string; status?: string; path?: string; limit?: number }) => request<FindingsResponse>(`/repos/${id}/findings${qs(p)}`),
     setStatus: (id: string, findingId: string, status: string) => request<Finding>(`/repos/${id}/findings/${findingId}`, { method: "PATCH", body: JSON.stringify({ status }) }),
     health: (id: string, recompute = false) => request<HealthScore>(`/repos/${id}/health-score${qs({ recompute: recompute ? "true" : undefined })}`),
     apiIntel: (id: string) => request<ApiIntel>(`/repos/${id}/api-intel`),

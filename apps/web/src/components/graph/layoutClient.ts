@@ -14,7 +14,7 @@ export type Positions = Record<string, Rect>;
 
 const CACHE_LIMIT = 24;
 // bump when the layout algorithm changes, so cached positions from the old one are not reused
-const LAYOUT_VERSION = 3;
+const LAYOUT_VERSION = 5;
 const cache = new Map<string, Positions>();
 let worker: Worker | null = null;
 let busy = false;
@@ -70,7 +70,7 @@ export function computeLayout(v: ViewModel, key: string): Promise<Positions> {
   const id = ++seq;
   const req: LayoutRequest = {
     id,
-    nodes: v.nodes.map((n) => ({ id: n.id, parent: n.parent, w: n.w, h: n.h, size: n.size, sortKey: n.sortKey, kind: n.kind, priv: n.priv })),
+    nodes: v.nodes.map((n) => ({ id: n.id, parent: n.parent, w: n.w, h: n.h, size: n.size, sortKey: n.sortKey, kind: n.kind, priv: n.priv, tier: n.tier, path: n.path })),
     edges: v.edges.map((e) => [e.source, e.target, e.kind]),
   };
   return new Promise<Positions>((resolve, reject) => {

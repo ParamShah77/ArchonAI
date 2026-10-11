@@ -5,7 +5,7 @@
 import { KIND_STYLE, type NodeKind } from "@/lib/api";
 import type { Positions } from "./layoutClient";
 import { boxPalette, chipPalette, MAP_BG, type BoxPalette, type ChipPalette } from "./palette";
-import type { ViewModel } from "./viewModel";
+import { TEST_PATH_RE, type ViewModel } from "./viewModel";
 
 export const BG = MAP_BG;
 
@@ -36,6 +36,14 @@ export interface MapNode {
   detail: string;
   detail2: string;
   files: number; // files inside (boxes)
+  index: number; // dense numeric id (fast pair keys while merging lines)
+  test: boolean; // test code (drawn greyer)
+  muted: boolean; // dev-only / fixture package
+  inner: boolean; // function nested in a function (drawn a little smaller)
+  fanIn: number; // files (for a file) or symbols (for a symbol) that use it
+  fanOut: number; // … that it uses
+  testedBy: number; // test files that import it (files only)
+  hubIn: number; // > 0 when this symbol is a hub: called from many places in its own file
   bandWorld: number; // open-box title band in world units, shared by siblings
 }
 
@@ -50,6 +58,14 @@ export interface MapModel {
   nodes: Map<string, MapNode>;
   roots: string[];
   edges: MapEdge[];
+  // the same relationships as integer arrays (built once), for the per-frame merge of lines
+  byIndex: MapNode[]; // node index -> node
+  chain: Int32Array[]; // node index -> [itself, nearest ancestor, …, root] as indices
+  eSrc: Int32Array;
+  eTgt: Int32Array;
+  eKind: Uint8Array; // index into kindNames
+  eExt: Uint8Array; // 1 = touches an external package
+  kindNames: string[];
   dominant: string | null; // a root that holds most of the code: opened at the overview
 }
 
@@ -83,7 +99,7 @@ function summarize(n: MapNode, nodes: Map<string, MapNode>): string[] {
       else if (k.kind === "class") {
         if (k.isType) c.type++;
         else c.cls++;
-      } else if (k.kind === "function" || k.kind === "method") c.fn++;
+      } else if ((k.kind === "function" || k.kind === "method") && !k.inner) c.fn++;
       else if (k.kind === "endpoint") c.ep++;
       else if (k.kind === "table") c.tbl++;
       else if (k.kind === "dependency") c.dep++;
@@ -146,6 +162,14 @@ export function buildMapModel(view: ViewModel, pos: Positions): MapModel {
       detail: v.detail ?? "",
       detail2: v.detail2 ?? "",
       files: 0,
+      index: 0,
+      test: !!v.test,
+      muted: !!v.muted,
+      inner: !!v.inner,
+      fanIn: 0,
+      fanOut: 0,
+      testedBy: 0,
+      hubIn: 0,
       bandWorld: 0,
     });
   }
@@ -170,14 +194,14 @@ export function buildMapModel(view: ViewModel, pos: Positions): MapModel {
   for (const n of nodes.values()) {
     const kindColor = KIND_STYLE[n.kind as NodeKind]?.color ?? "#9aabc4";
     if (n.box) {
-      n.pal = boxPalette(Math.max(0, n.areaIndex), n.depth, n.neutral || n.areaIndex < 0);
+      n.pal = boxPalette(Math.max(0, n.areaIndex), n.depth, n.neutral || n.areaIndex < 0, n.test);
       n.hue = n.pal.title;
       n.summary = summarize(n, nodes);
     } else {
       const parent = n.parent ? nodes.get(n.parent) : undefined;
-      const surface = parent ? boxPalette(Math.max(0, parent.areaIndex), parent.depth, parent.neutral || parent.areaIndex < 0) : boxPalette(0, 0, true);
+      const surface = parent ? boxPalette(Math.max(0, parent.areaIndex), parent.depth, parent.neutral || parent.areaIndex < 0, parent.test) : boxPalette(0, 0, true);
       n.pal = surface;
-      n.chip = chipPalette(kindColor, surface.frameL, n.priv);
+      n.chip = chipPalette(kindColor, surface.frameL, n.priv, n.muted);
       n.hue = kindColor;
     }
   }
@@ -195,6 +219,64 @@ export function buildMapModel(view: ViewModel, pos: Positions): MapModel {
       n.bandWorld = bandWorld;
     }
   }
+  // Facts for hover cards: who uses a file / symbol, who it uses, and which test files import it.
+  let i = 0;
+  for (const n of nodes.values()) n.index = i++;
+  const fileOf = (id: string): MapNode | undefined => {
+    const n = nodes.get(id);
+    if (!n) return undefined;
+    if (n.kind === "file") return n;
+    for (const a of n.ancestors) if (nodes.get(a)!.kind === "file") return nodes.get(a);
+    return undefined;
+  };
+  const filesIn = new Map<string, Set<string>>();
+  const filesOut = new Map<string, Set<string>>();
+  const symIn = new Map<string, Set<string>>();
+  const symOut = new Map<string, Set<string>>();
+  const add = (m: Map<string, Set<string>>, k: string, v: string) => {
+    if (!m.has(k)) m.set(k, new Set());
+    m.get(k)!.add(v);
+  };
+  const localIn = new Map<string, number>(); // calls from siblings in the same box (hub detection)
+  for (const e of view.edges) {
+    if (e.external) continue;
+    const fa = fileOf(e.source);
+    const fb = fileOf(e.target);
+    if (fa && fb && fa.id !== fb.id) {
+      add(filesOut, fa.id, fb.id);
+      add(filesIn, fb.id, fa.id);
+    }
+    const a = nodes.get(e.source);
+    const b = nodes.get(e.target);
+    if (a && b && !a.box && !b.box) {
+      add(symOut, a.id, b.id);
+      add(symIn, b.id, a.id);
+      if (e.kind === "calls" && a.parent && a.parent === b.parent) localIn.set(b.id, (localIn.get(b.id) ?? 0) + 1);
+    }
+  }
+  for (const n of nodes.values()) {
+    if (n.kind === "file") {
+      n.fanIn = filesIn.get(n.id)?.size ?? 0;
+      n.fanOut = filesOut.get(n.id)?.size ?? 0;
+      n.testedBy = [...(filesIn.get(n.id) ?? [])].filter((id) => TEST_PATH_RE.test(nodes.get(id)!.path)).length;
+    } else if (!n.box) {
+      n.fanIn = symIn.get(n.id)?.size ?? 0;
+      n.fanOut = symOut.get(n.id)?.size ?? 0;
+    }
+  }
+  // hubs: a symbol called from many places in its own box (at most two per box) — its incoming lines are
+  // drawn quietly with a count instead of a fan of arrows
+  for (const n of nodes.values()) {
+    if (!n.box) continue;
+    const leaves = n.children.map((c) => nodes.get(c)!).filter((c) => !c.box);
+    if (leaves.length < 4) continue;
+    const cut = Math.max(5, 0.3 * leaves.length);
+    leaves
+      .filter((c) => (localIn.get(c.id) ?? 0) >= cut)
+      .sort((x, y) => (localIn.get(y.id) ?? 0) - (localIn.get(x.id) ?? 0))
+      .slice(0, 2)
+      .forEach((c) => (c.hubIn = localIn.get(c.id) ?? 0));
+  }
   // One root holding most of the code (e.g. a single `src`) would make the first zoom step reveal nothing:
   // the renderer opens it at the overview instead.
   const totalFiles = [...nodes.values()].filter((n) => n.kind === "file").length;
@@ -205,10 +287,22 @@ export function buildMapModel(view: ViewModel, pos: Positions): MapModel {
           return n.box && !n.neutral && n.files >= Math.max(4, 0.7 * totalFiles) && n.children.length <= 12;
         }) ?? null)
       : null;
+  const edges = view.edges.filter((e) => nodes.has(e.source) && nodes.has(e.target)).map((e) => ({ source: e.source, target: e.target, kind: e.kind, external: e.external }));
+  const byIndex = [...nodes.values()].sort((a, b) => a.index - b.index);
+  const chain = byIndex.map((n) => Int32Array.from([n.index, ...n.ancestors.map((a) => nodes.get(a)!.index)]));
+  const kindNames = [...new Set(edges.map((e) => e.kind))];
+  const kindIdx = new Map(kindNames.map((k, i) => [k, i]));
   return {
     nodes,
     roots,
     dominant,
-    edges: view.edges.filter((e) => nodes.has(e.source) && nodes.has(e.target)).map((e) => ({ source: e.source, target: e.target, kind: e.kind, external: e.external })),
+    edges,
+    byIndex,
+    chain,
+    eSrc: Int32Array.from(edges, (e) => nodes.get(e.source)!.index),
+    eTgt: Int32Array.from(edges, (e) => nodes.get(e.target)!.index),
+    eKind: Uint8Array.from(edges, (e) => kindIdx.get(e.kind)!),
+    eExt: Uint8Array.from(edges, (e) => (e.external ? 1 : 0)),
+    kindNames,
   };
 }

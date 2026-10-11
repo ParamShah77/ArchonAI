@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Database, MessageSquare, Plus, Send } from "lucide-react";
 import { api, type ChatMessage, type ChatSource } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
@@ -22,7 +23,9 @@ export function ChatPanel() {
   const convs = useApi(`convs:${repo.id}`, () => api.chat.conversations(repo.id));
   const [cid, setCid] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [q, setQ] = useState("");
+  // `?q=` (e.g. "Ask Chat about it" on the code map) prefills the question; it is not sent until you do
+  const sp = useSearchParams();
+  const [q, setQ] = useState(() => sp.get("q") ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reindexing, setReindexing] = useState(false);

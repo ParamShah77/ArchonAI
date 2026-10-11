@@ -1,20 +1,25 @@
 "use client";
 
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, ChevronUp, Maximize2, Search } from "lucide-react";
+import { ChevronDown, ChevronRight, ChevronUp, HeartPulse, Layers, Maximize2, Search } from "lucide-react";
 import { api, EDGE_STYLE, KIND_STYLE } from "@/lib/api";
-import type { GraphNode } from "@/lib/api";
+import type { Graph, GraphNode } from "@/lib/api";
 import { useApi, useDebounced } from "@/lib/hooks";
 import { useRepo } from "@/components/RepoShell";
-import { MapCanvas, type Crumb, type MapController, type MapKey } from "@/components/graph/MapCanvas";
+import { MapCanvas, type Crumb, type MapController, type MapKey, type NodeAction } from "@/components/graph/MapCanvas";
 import { MapControls } from "@/components/graph/MapControls";
-import { MAP_BG } from "@/components/graph/palette";
+import { HEALTH_LABELS, HEALTH_TILES, MAP_BG } from "@/components/graph/palette";
+import { runAction } from "@/components/graph/nodeActions";
 import { NodePanel } from "@/components/graph/NodePanel";
 import { ErrorBox, KindBadge, Spinner } from "@/components/ui";
 
 const KEY_OPEN = "archon.map.key.open";
 const PANEL_W = 380; // details panel width (it slides over the map)
+
+// The whole-hierarchy graph, kept while you visit other tabs of the same repository (the camera is
+// remembered by the map itself), so coming back to the Code Map is instant and keeps your place.
+const graphCache = new Map<string, Graph>();
 
 /**
  * Semantic-zoom code map (decisions.md D-024, D-026, D-027, D-029). One request loads the whole hierarchy; the canvas
@@ -23,7 +28,9 @@ const PANEL_W = 380; // details panel width (it slides over the map)
  */
 export function GraphExplorer() {
   const { repo } = useRepo();
+  const router = useRouter();
   const sp = useSearchParams();
+  const [lens, setLens] = useState<"structure" | "health">("structure");
   const [selected, setSelected] = useState<string | null>(sp.get("node") ?? sp.get("focus"));
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
   const [mapKey, setMapKey] = useState<MapKey | null>(null);
@@ -48,8 +55,18 @@ export function GraphExplorer() {
   if (selected && selected !== panelId) setPanelId(selected);
   const panelOpen = !!selected;
 
-  const { data: graph, error, loading } = useApi(`graph:${repo.id}:${repo.updated_at}:all`, () =>
-    api.graph.view(repo.id, { level: "all" }),
+  const graphKey = `graph:${repo.id}:${repo.updated_at}:all`;
+  const { data: graph, error, loading } = useApi(graphKey, async () => {
+    const hit = graphCache.get(graphKey);
+    if (hit) return hit;
+    const g = await api.graph.view(repo.id, { level: "all" });
+    if (graphCache.size >= 3) graphCache.delete(graphCache.keys().next().value as string);
+    graphCache.set(graphKey, g);
+    return g;
+  });
+  // findings are only loaded for the Health lens (and kept while it is on)
+  const findings = useApi(lens === "health" ? `map-findings:${repo.id}:${repo.updated_at}` : null, () =>
+    api.analysis.findings(repo.id, { status: "open", limit: 2000 }),
   );
   const search = useApi(dq.length >= 2 ? `search:${repo.id}:${dq}` : null, () => api.graph.search(repo.id, dq));
 
@@ -111,6 +128,18 @@ export function GraphExplorer() {
     ctrl.current?.zoomTo(n.id, { pulse: 2 }); // two pings where it landed, so the eye finds it
   };
   const results = search.data?.results ?? [];
+  // the highlighted search result gets a soft ring on the map (the camera stays put until you pick it)
+  const previewId = dq.length >= 2 ? (results[active]?.id ?? null) : null;
+  useEffect(() => {
+    mapCtrl?.preview(previewId);
+  }, [mapCtrl, previewId]);
+  const onAction = useCallback(
+    (kind: NodeAction, id: string) => {
+      const n = graph?.nodes.find((x) => x.id === id);
+      if (n) runAction(kind, repo, n, (href) => router.push(href));
+    },
+    [graph, repo, router],
+  );
   const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -152,7 +181,25 @@ export function GraphExplorer() {
             ))}
           </nav>
 
-          <div className="relative ml-auto w-72 shrink-0">
+          {/* lens: the calm structure view, or a soft heat map of open findings per 1,000 lines */}
+          <div className="ml-auto flex items-center rounded-md border border-line-strong overflow-hidden text-xs shrink-0">
+            <button
+              className={`px-2.5 py-1.5 flex items-center gap-1.5 ${lens === "structure" ? "bg-elev2 text-fg" : "text-muted hover:text-fg"}`}
+              onClick={() => setLens("structure")}
+              title="Colour by area"
+            >
+              <Layers size={13} /> Structure
+            </button>
+            <button
+              className={`px-2.5 py-1.5 flex items-center gap-1.5 border-l border-line-strong ${lens === "health" ? "bg-elev2 text-fg" : "text-muted hover:text-fg"}`}
+              onClick={() => setLens("health")}
+              title="Colour by open findings per 1,000 lines (from the Audit tab's analysis)"
+            >
+              <HeartPulse size={13} /> Health
+            </button>
+          </div>
+
+          <div className="relative w-72 shrink-0">
             <Search size={14} className="absolute left-2.5 top-2.5 text-faint" />
             <input
               ref={searchRef}
@@ -206,10 +253,22 @@ export function GraphExplorer() {
               onKey={setMapKey}
               insetBottom={keyH ? keyH + 16 : 0}
               insetRight={panelOpen ? PANEL_W : 0}
+              lens={lens}
+              findings={findings.data?.findings ?? null}
+              onAction={onAction}
+              storageKey={`archon.map.camera.${repo.id}`}
             />
           )}
 
-          {mapKey && <MapLegend mapKey={mapKey} open={keyOpen} onToggle={toggleKey} onHeight={setKeyH} />}
+          {mapKey && (
+            <MapLegend
+              mapKey={mapKey}
+              open={keyOpen}
+              onToggle={toggleKey}
+              onHeight={setKeyH}
+              health={lens === "health" ? { loading: findings.loading && !findings.data, count: findings.data?.findings.length ?? 0 } : null}
+            />
+          )}
           {graph && <MapControls ctrl={mapCtrl} right={panelOpen ? PANEL_W : 0} />}
 
           {/* the details panel slides over the map: the map keeps its size, so nothing opens or jumps */}
@@ -242,7 +301,19 @@ export function GraphExplorer() {
 }
 
 /** A key that explains exactly what this map draws: its areas, symbol kinds and line styles. */
-function MapLegend({ mapKey, open, onToggle, onHeight }: { mapKey: MapKey; open: boolean; onToggle: () => void; onHeight: (h: number) => void }) {
+function MapLegend({
+  mapKey,
+  open,
+  onToggle,
+  onHeight,
+  health,
+}: {
+  mapKey: MapKey;
+  open: boolean;
+  onToggle: () => void;
+  onHeight: (h: number) => void;
+  health: { loading: boolean; count: number } | null;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   // tell the map how much of its bottom edge the key covers, so fits keep content above it
   useEffect(() => {
@@ -253,7 +324,7 @@ function MapLegend({ mapKey, open, onToggle, onHeight }: { mapKey: MapKey; open:
     const ro = new ResizeObserver(report);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [onHeight, open]);
+  }, [onHeight, open, health]);
   return (
     <div ref={ref} className="absolute bottom-3 left-3 z-10 max-w-[min(560px,calc(100%-24px))]">
       <div className="rounded-lg border border-line px-3 py-2 text-[11px] text-muted shadow-lg" style={{ background: `${MAP_BG}eb` }}>
@@ -264,7 +335,26 @@ function MapLegend({ mapKey, open, onToggle, onHeight }: { mapKey: MapKey; open:
         </button>
         {open && (
           <div className="mt-1.5 space-y-1.5">
-            {mapKey.areas.length > 0 && (
+            {health && (
+              <Row title="Health">
+                {health.loading ? (
+                  <span className="text-faint">loading findings…</span>
+                ) : health.count === 0 ? (
+                  <span className="text-faint">no open findings: run an analysis on the Audit tab</span>
+                ) : (
+                  <>
+                    {HEALTH_TILES.map((t, i) => (
+                      <span key={i} className="flex items-center gap-1.5">
+                        <span className="h-2.5 w-3.5 rounded-[3px]" style={{ background: `linear-gradient(${t.top}, ${t.bottom})`, border: `1px solid ${t.border}` }} />
+                        {HEALTH_LABELS[i]}
+                      </span>
+                    ))}
+                    <span className="text-faint">· findings per 1,000 lines · {health.count} open</span>
+                  </>
+                )}
+              </Row>
+            )}
+            {!health && mapKey.areas.length > 0 && (
               <Row title="Areas">
                 {mapKey.areas.map((a) => (
                   <span key={a.id} className="flex items-center gap-1.5">
@@ -294,8 +384,9 @@ function MapLegend({ mapKey, open, onToggle, onHeight }: { mapKey: MapKey; open:
               {mapKey.external && <LineSample label="uses a package" color="#a9b3c4" dash={[1.5, 5]} faint />}
             </Row>
             <div className="text-faint">
-              Scroll to zoom · drag to pan · click to inspect (its lines light up: amber = uses, periwinkle = used by) · double-click to go
-              in, on empty space or a title to step out · keys: Backspace up · 0 fit all · + − zoom · arrows pan · / search · Esc clear
+              Scroll to zoom · drag to pan · click to inspect (its lines light up: amber = uses, periwinkle = used by) · right-click for
+              next steps · double-click to go in, on empty space or a title to step out · hover a line to see what it carries · keys:
+              Backspace up · 0 fit all · + − zoom · arrows pan · / search · Esc clear
             </div>
           </div>
         )}

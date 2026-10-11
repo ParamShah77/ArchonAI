@@ -14,6 +14,8 @@ import type { Graph, GraphNode } from "@/lib/api";
 export const PACKAGES_ID = "__packages__";
 export const SYNTHETIC_DIR_PREFIX = "__dir__:";
 export const OTHER_FILES_PREFIX = "__files__:";
+/** Test code and fixtures (same rule as the backend's TEST_PATH_RE). */
+export const TEST_PATH_RE = /(^|\/)(tests?|__tests__|spec|e2e)(\/|$)|(^|\/)test_[^/]+\.py$|[._](test|spec)\.[jt]sx?$|_test\.go$|Test\w*\.java$/;
 
 /** Ids that exist only in the drawing (not in the API graph). */
 export const isSynthetic = (id: string) => id.startsWith("__");
@@ -42,6 +44,10 @@ export interface ViewNode {
   isComponent?: boolean; // React component: PascalCase function in a .jsx/.tsx file
   detail?: string; // second line on a symbol card: "(self, repo_id: str) · L42–88 · async", "GET /repos", "1.2.0"
   detail2?: string; // third line: decorators
+  test?: boolean; // test code: drawn a little greyer, placed after product code
+  tier: number; // ordering tier: 0 product code, 1 tests, 2 groups (Packages, Other files)
+  muted?: boolean; // dev-only or test-fixture package: outline-only chip
+  inner?: boolean; // a function nested in another function: drawn a little smaller
   quiet?: boolean; // a file with no symbols and no relationships (e.g. an empty __init__.py)
   synthetic?: boolean;
 }
@@ -94,7 +100,17 @@ export function buildView(g: Graph): ViewModel {
     if (e.kind !== "contains") continue;
     const src = byId.get(e.source);
     if (!src || !byId.has(e.target) || !CONTAINER_KINDS.has(src.kind) || parentOf.has(e.target)) continue;
+    // an ORM model's table belongs to its file, not inside the class (which would become a box for one chip)
+    if (src.kind === "class" && byId.get(e.target)!.kind === "table") continue;
     parentOf.set(e.target, e.source);
+  }
+  // functions nested in a function (function -> function contains): sorted right after their parent
+  const outerOf = new Map<string, string>();
+  for (const e of g.edges) {
+    if (e.kind !== "contains") continue;
+    const a = byId.get(e.source);
+    const b = byId.get(e.target);
+    if (a && b && (a.kind === "function" || a.kind === "method") && b.kind === "function") outerOf.set(b.id, a.name);
   }
   // guard against cycles (should not happen, but a cycle would hang the layout)
   for (const id of [...parentOf.keys()]) {
@@ -191,6 +207,19 @@ export function buildView(g: Graph): ViewModel {
     }
   }
 
+  // Empty marker files (no symbols, no relationships, at most 3 lines: an empty __init__.py) carry nothing.
+  {
+    const touchedFiles = new Set(edges.flatMap((e) => [e.source, e.target]));
+    const hasKids = new Set(parentOf.values());
+    for (const n of [...byId.values()]) {
+      if (n.kind !== "file" || hasKids.has(n.id) || touchedFiles.has(n.id)) continue;
+      if (n.end_line <= 3) {
+        byId.delete(n.id);
+        parentOf.delete(n.id);
+      }
+    }
+  }
+
   // 3. loose symbol-less files (configs, __init__.py) next to sub-folders gather into one "Other files" box,
   //    instead of floating as specks between big tiles. Only where there are at least two of them.
   const childCount = new Map<string, number>();
@@ -217,6 +246,7 @@ export function buildView(g: Graph): ViewModel {
       label: p ? `Other files (${ids.length})` : `Root files (${ids.length})`,
       fullLabel: p ? "Other files" : "Root files",
       kind: "files",
+      tier: 2,
       parent: p || undefined,
       size: 0,
       w: 0,
@@ -256,6 +286,18 @@ export function buildView(g: Graph): ViewModel {
     const { label, full } = labelOf(n);
     const chars = Math.min(label.length, 24);
     const priv = (n.kind === "function" || n.kind === "method") && /^_(?!_)/.test(n.name);
+    const test = TEST_PATH_RE.test(n.path) || undefined;
+    let sortKey = `${KIND_ORDER[n.kind] ?? 9}${priv ? 1 : 0}${label.toLowerCase()}`; // public before private
+    let muted: boolean | undefined;
+    if (n.kind === "dependency") {
+      // packages: by ecosystem, product before dev before fixtures, most used first
+      const fixture = n.meta.fixture === true;
+      const dev = n.meta.dev === true;
+      muted = fixture || dev || undefined;
+      sortKey = `${n.meta.ecosystem ?? ""}${fixture ? 2 : dev ? 1 : 0}${String(9999 - Math.min(9999, d)).padStart(4, "0")}${label.toLowerCase()}`;
+    }
+    const outer = outerOf.get(n.id);
+    if (outer) sortKey = `${KIND_ORDER[n.kind] ?? 9}${priv ? 1 : 0}${outer.toLowerCase()}~${label.toLowerCase()}`;
     return {
       id: n.id,
       label,
@@ -266,7 +308,11 @@ export function buildView(g: Graph): ViewModel {
       w: Math.max(size, chars * 6.7 + 34), // room for the chip: kind dot + monospace name
       h: LEAF_H,
       major: isParent.has(n.id) || n.kind === "endpoint" || n.kind === "table" || (d > 0 && d >= hubCut),
-      sortKey: `${KIND_ORDER[n.kind] ?? 9}${priv ? 1 : 0}${label.toLowerCase()}`, // public before private
+      sortKey,
+      tier: test ? 1 : 0,
+      test,
+      muted,
+      inner: outer ? true : undefined,
       path: n.path,
       lines: n.end_line > 0 ? n.end_line - Math.max(1, n.start_line) + 1 : 0,
       isType: n.meta.interface === true || undefined,
@@ -279,7 +325,7 @@ export function buildView(g: Graph): ViewModel {
   });
   nodes.push(...otherBoxes);
   if ([...byId.values()].some((n) => n.kind === "dependency")) {
-    nodes.push({ id: PACKAGES_ID, label: "Packages", fullLabel: "Packages", kind: "group", size: 0, w: 0, h: 0, major: true, sortKey: "z", path: "", lines: 0, synthetic: true });
+    nodes.push({ id: PACKAGES_ID, label: "Packages", fullLabel: "Packages", kind: "group", tier: 2, size: 0, w: 0, h: 0, major: true, sortKey: "z", path: "", lines: 0, synthetic: true });
   }
   return { nodes, edges };
 }

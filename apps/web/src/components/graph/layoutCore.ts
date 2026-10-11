@@ -19,6 +19,8 @@ export interface LayoutNode {
   sortKey: string;
   kind?: string;
   priv?: boolean;
+  tier?: number; // 0 product code, 1 tests, 2 groups (Packages, Other files): later tiers come last
+  path?: string;
 }
 
 export type LayoutEdge = [string, string, string]; // source, target, kind
@@ -63,6 +65,8 @@ export interface Rect {
 
 interface Item {
   id: string;
+  node?: LayoutNode;
+  rank?: number; // dependency order among box siblings (users before what they use)
   header?: number;
   pad?: number;
   leaf?: LayoutNode;
@@ -261,12 +265,58 @@ function layerLeaves(kids: Item[], edges: LayoutEdge[]): { order: Item[]; breaks
   return { order, breaks };
 }
 
+const tierOf = (i: Item) => i.node?.tier ?? 0;
+const sizeBucket = (i: Item) => Math.floor(Math.log2(Math.max(1, i.w * i.h)));
+const pathOf = (i: Item) => i.node?.path ?? i.id;
+
+/** Order inside a box: boxes before loose leaves; product code before tests before groups; then files that
+ *  use things before the things they use; then bigger before smaller (by size bucket); then by path. */
 function sortKids(item: Item): Item[] {
   return [...item.children].sort((a, b) => {
-    if (!!a.leaf !== !!b.leaf) return a.leaf ? 1 : -1; // boxes before loose leaves
-    if (!a.leaf && !b.leaf) return b.h - a.h || b.w - a.w || (a.id < b.id ? -1 : 1); // tallest first
-    return a.leaf!.sortKey < b.leaf!.sortKey ? -1 : a.leaf!.sortKey > b.leaf!.sortKey ? 1 : 0;
+    if (!!a.leaf !== !!b.leaf) return a.leaf ? 1 : -1;
+    if (!a.leaf && !b.leaf) {
+      return (
+        tierOf(a) - tierOf(b) ||
+        (a.rank ?? 0) - (b.rank ?? 0) ||
+        sizeBucket(b) - sizeBucket(a) ||
+        (pathOf(a) < pathOf(b) ? -1 : pathOf(a) > pathOf(b) ? 1 : 0)
+      );
+    }
+    return tierOf(a) - tierOf(b) || (a.leaf!.sortKey < b.leaf!.sortKey ? -1 : a.leaf!.sortKey > b.leaf!.sortKey ? 1 : 0);
   });
+}
+
+/** Dependency rank of a box's child boxes from the relationships between them (lifted to those children):
+ *  longest path from the ones nothing uses, cycles broken in path order. */
+function rankChildren(item: Item, sib: [string, string][]) {
+  const boxes = item.children.filter((c) => !c.leaf);
+  if (boxes.length < 2 || !sib.length) return;
+  const ids = [...boxes].sort((a, b) => (pathOf(a) < pathOf(b) ? -1 : 1)).map((b) => b.id);
+  const out = new Map<string, Set<string>>(ids.map((id) => [id, new Set<string>()]));
+  for (const [a, b] of sib) if (out.has(a) && out.has(b) && a !== b) out.get(a)!.add(b);
+  const state = new Map<string, number>();
+  const dag = new Map<string, string[]>(ids.map((id) => [id, []]));
+  const visit = (u: string) => {
+    state.set(u, 1);
+    for (const v of out.get(u)!) {
+      if (state.get(v) === 1) continue;
+      dag.get(u)!.push(v);
+      if (!state.has(v)) visit(v);
+    }
+    state.set(u, 2);
+  };
+  for (const id of ids) if (!state.has(id)) visit(id);
+  const preds = new Map<string, string[]>(ids.map((id) => [id, []]));
+  for (const [u, vs] of dag) for (const v of vs) preds.get(v)!.push(u);
+  const rank = new Map<string, number>();
+  const depth = (v: string): number => {
+    const r = rank.get(v);
+    if (r !== undefined) return r;
+    const d = Math.max(0, ...preds.get(v)!.map((u) => depth(u) + 1));
+    rank.set(v, d);
+    return d;
+  };
+  for (const b of boxes) b.rank = depth(b.id);
 }
 
 /** Tiles in a row share top and bottom edges (if similar in height); a nearly full row fills out. */
@@ -298,13 +348,14 @@ function equaliseRows(kids: Item[], s: Placed, gx: number) {
   }
 }
 
-function pack(item: Item, edgesByBox: Map<string, LayoutEdge[]>): void {
+function pack(item: Item, edgesByBox: Map<string, LayoutEdge[]>, sibByBox: Map<string, [string, string][]>): void {
   if (item.leaf) {
     item.w = item.leaf.w;
     item.h = item.leaf.h;
     return;
   }
-  for (const c of item.children) pack(c, edgesByBox);
+  for (const c of item.children) pack(c, edgesByBox, sibByBox);
+  rankChildren(item, sibByBox.get(item.id) ?? []);
   let kids = sortKids(item);
   let s: Placed;
   if (kids.every((k) => k.leaf)) {
@@ -320,7 +371,17 @@ function pack(item: Item, edgesByBox: Map<string, LayoutEdge[]>): void {
     // gaps scale with the tiles, so big tiles do not touch and small ones do not drift apart
     const sides = kids.filter((k) => !k.leaf).map((k) => Math.min(k.w, k.h)).sort((a, b) => a - b);
     const gap = Math.min(80, Math.max(14, 0.06 * sides[Math.floor(sides.length / 2)]));
-    s = bestShelf(kids, gap, gap, true);
+    // a file with classes and loose functions: the classes first, then the functions in call-flow layers
+    const boxKids = kids.filter((k) => !k.leaf);
+    const leafKids = kids.filter((k) => k.leaf);
+    const inner = edgesByBox.get(item.id) ?? [];
+    let breaks: Set<number> | undefined;
+    if (leafKids.length >= 3 && inner.length >= 3) {
+      const lay = layerLeaves(leafKids, inner);
+      kids = [...boxKids, ...lay.order];
+      breaks = new Set([boxKids.length, ...[...lay.breaks].map((i) => i + boxKids.length)]);
+    }
+    s = bestShelf(kids, gap, gap, true, breaks);
     equaliseRows(kids, s, gap);
   }
   kids.forEach((k, i) => {
@@ -343,7 +404,8 @@ function placeRoots(roots: Item[]): void {
     return;
   }
   const gap = Math.max(ROOT_GAP, 0.07 * Math.sqrt(roots.reduce((s, r) => s + r.w * r.h, 0)));
-  const kids = sortKids({ id: "__root__", children: roots, w: 0, h: 0, x: 0, y: 0 });
+  // product code first (biggest first), then tests, then Packages / loose files
+  const kids = [...roots].sort((a, b) => tierOf(a) - tierOf(b) || b.w * b.h - a.w * a.h || (pathOf(a) < pathOf(b) ? -1 : 1));
   const s = bestShelf(kids, gap, gap, false);
   kids.forEach((k, i) => {
     k.x = s.place[i].x - s.w / 2;
@@ -366,7 +428,7 @@ function emit(item: Item, cx: number, cy: number, out: Record<string, Rect>): vo
 
 export function runLayout(nodes: LayoutNode[], edges: LayoutEdge[]): Record<string, Rect> {
   const items = new Map<string, Item>();
-  for (const n of nodes) items.set(n.id, { id: n.id, children: [], w: 0, h: 0, x: 0, y: 0 });
+  for (const n of nodes) items.set(n.id, { id: n.id, node: n, children: [], w: 0, h: 0, x: 0, y: 0 });
   const hasChildren = new Set<string>();
   for (const n of nodes) if (n.parent && items.has(n.parent)) hasChildren.add(n.parent);
   for (const n of nodes) {
@@ -389,7 +451,27 @@ export function runLayout(nodes: LayoutNode[], edges: LayoutEdge[]): Record<stri
     if (!edgesByBox.has(p)) edgesByBox.set(p, []);
     edgesByBox.get(p)!.push(e);
   }
-  for (const r of roots) pack(r, edgesByBox);
+  // relationships between parts of a box, lifted to its direct children: drives "users before used"
+  const chain = (id: string) => {
+    const out: string[] = [];
+    for (let cur: string | undefined = id; cur; cur = parentOf.get(cur)) out.push(cur);
+    return out; // the node, then its ancestors up to the root
+  };
+  const sibByBox = new Map<string, [string, string][]>();
+  for (const [s0, t0] of edges) {
+    const a = chain(s0);
+    const b = chain(t0);
+    const inB = new Set(b);
+    const lcaIdx = a.findIndex((x) => inB.has(x));
+    if (lcaIdx <= 0) continue; // no common box, or one contains the other
+    const lca = a[lcaIdx];
+    const ca = a[lcaIdx - 1];
+    const cb = b[b.indexOf(lca) - 1];
+    if (!cb || ca === cb) continue;
+    if (!sibByBox.has(lca)) sibByBox.set(lca, []);
+    sibByBox.get(lca)!.push([ca, cb]);
+  }
+  for (const r of roots) pack(r, edgesByBox, sibByBox);
   placeRoots(roots);
   const out: Record<string, Rect> = {};
   for (const r of roots) emit(r, r.x, r.y, out);
