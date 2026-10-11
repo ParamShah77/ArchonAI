@@ -16,6 +16,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from archon.graph.model import Edge, EdgeKind, FileExtraction, Node, NodeKind, make_id
+from archon.graph.paths import TEST_PATH_RE
 from archon.ingest.manifests import Dependency
 
 _JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts")
@@ -87,7 +88,14 @@ class GraphBuilder:
                 NodeKind.DEPENDENCY,
                 name=d.name,
                 qualified_name=key,
-                meta={"ecosystem": d.ecosystem, "version": d.version, "dev": d.dev, "manifest": d.manifest},
+                meta={
+                    "ecosystem": d.ecosystem,
+                    "version": d.version,
+                    "dev": d.dev,
+                    "manifest": d.manifest,
+                    # declared only by a manifest inside test code (a fixture app), not by the product
+                    "fixture": bool(TEST_PATH_RE.search(d.manifest or "")),
+                },
             )
             self.g.add_node(n)
             self._dep_nodes[key] = n
@@ -122,6 +130,18 @@ class GraphBuilder:
         for imp in fx.imports:
             module = imp.get("module") or ""
             level = int(imp.get("level") or 0)
+            # `from pkg import sub, other`: link to the submodules themselves, not to pkg/__init__.py
+            if fx.language == "python" and imp.get("names"):
+                subs = self._python_submodules(fx.path, module, level, imp["names"])
+                if subs:
+                    for t in subs:
+                        self.g.add_edge(
+                            Edge(
+                                src.id, t.id, EdgeKind.IMPORTS, {"names": imp.get("names", []), "line": imp.get("line")}
+                            )
+                        )
+                        self._file_imports[fx.path].add(t.path)
+                    continue
             target = self._resolve_module(fx, module, level)
             if target is not None:
                 self.g.add_edge(
@@ -176,6 +196,27 @@ class GraphBuilder:
                 return hit
         return None
 
+    def _python_full_module(self, from_path: str, module: str, level: int) -> str:
+        if level <= 0:
+            return module
+        base_dir = posixpath.dirname(from_path)
+        for _ in range(level - 1):
+            base_dir = posixpath.dirname(base_dir)
+        base_mod = base_dir.replace("/", ".") if base_dir else ""
+        return f"{base_mod}.{module}".strip(".") if module else base_mod
+
+    def _python_submodules(self, from_path: str, module: str, level: int, names: list[str]) -> list[Node]:
+        full = self._python_full_module(from_path, module, level)
+        out: list[Node] = []
+        for name in names:
+            name = name.split(" as ")[0].strip()
+            if not name or name == "*":
+                continue
+            hit = self._exact_module(f"{full}.{name}" if full else name)
+            if hit is not None and hit.path != from_path and hit not in out:
+                out.append(hit)
+        return out
+
     def _exact_module(self, module: str) -> Node | None:
         cands = self._file_by_module.get(module)
         if not cands:
@@ -199,11 +240,20 @@ class GraphBuilder:
                     if hit is not None:
                         return hit
                 if not d:
-                    return None
+                    break
                 d = posixpath.dirname(d)
+            # last resort (aliases mapped to unusual folders): a unique file whose path ends with the alias path
+            return self._js_suffix(base)
         else:
             return None
         return self._js_candidates(base)
+
+    def _js_suffix(self, base: str) -> Node | None:
+        suffixes = (base, *[base + ext for ext in _JS_EXTS], *[posixpath.join(base, "index" + ext) for ext in _JS_EXTS])
+        hits = {
+            n.path: n for p, n in self._file_by_path.items() for sfx in suffixes if p == sfx or p.endswith("/" + sfx)
+        }
+        return next(iter(hits.values())) if len(hits) == 1 else None
 
     def _js_candidates(self, base: str) -> Node | None:
         for cand in (

@@ -209,6 +209,24 @@ Bash tool call in Claude Code
 
 ## Session changelog
 
+### Session 2026-10-12 — Workspace safety fix and graph relationships (tier 3, part 1)
+- `apps/api/archon/ingest/workspace.py`:
+  - new `_remove_tree` (clears read-only flags) and `_refresh_clone` (in-place fetch and reset, guarded);
+  - `_git(ceiling=)` sets `GIT_CEILING_DIRECTORIES`;
+  - `_describe(ceiling=)`;
+  - `clone_or_locate` refreshes or re-clones;
+  - `remove_checkout` uses `_remove_tree`.
+- Incident during this session: an unguarded first version reset ARCHON's own repo. It was recovered from the reflog (see D-030) and the lost uncommitted work was re-applied.
+- `apps/api/archon/graph/builder.py`:
+  - `_python_submodules` / `_python_full_module`: `from pkg import sub` links to the submodule;
+  - `_js_suffix`: unique suffix fallback for aliases;
+  - dependency `meta.fixture`.
+- New `archon/graph/paths.py` (`TEST_PATH_RE`, also used by `analysis/base.py`).
+- Tests:
+  - `test_workspace.py`: read-only removal, plus the incident regression;
+  - `test_builder.py`: submodule imports, fixture packages.
+- Flow: the re-index of a cloned repo now goes clone_or_locate -> `_refresh_clone` (guarded) or `_remove_tree` + `git clone`.
+
 ### Session 2026-10-11 (later) — Code Map batch 2
 - The owner said "next": tier 2 of `docs/code-map-plan.md` implemented with the recommended defaults (decision D-029).
 - New `apps/web/src/components/graph/palette.ts`: OKLCH/OKLab conversion, `mixOklab`, `contrast`, map tokens, `boxPalette(index, depth, neutral)`, `chipPalette()`, focus direction colours.

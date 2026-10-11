@@ -405,3 +405,23 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
   - Folder links beyond the strongest 18 appear only on focus.
   - The panel now covers the right of the map instead of shrinking it.
   - Tier 3 items remain open: Health lens, hover cards with more facts, edge tags at the screen edge, right-click actions, backend relationship fixes, bundled exits.
+
+## D-030 — Workspace clones: refresh in place, but never let git escape the clone folder; graph relationship fixes
+- **Date:** 2026-10-12
+- **Status:** Accepted
+- **Context:**
+  - **Re-index failed:** re-indexing a GitHub repo failed with "destination path already exists". On Windows, git marks object files read-only, so `shutil.rmtree(..., ignore_errors=True)` silently left a half-deleted clone behind.
+  - **Incident:** a first fix updated an existing clone in place (`remote set-url` / `fetch` / `reset --hard` / `clean`). The workspace folder (`D:\ArchonAI\workspace\<id>`) lives inside ARCHON's own checkout, and the clone's `.git` was broken. Git discovery therefore walked up to ARCHON's repository and reset its `main` to the fetched commit and repointed its `origin`. It was recovered from the reflog with the owner's go-ahead: `main` back at 0db12f0, `origin` back to github.com/ParamShah77/ArchonAI, `origin/main` back at 53e89c1. Only uncommitted work was lost; it was re-applied.
+  - **Graph data:** the review (tier 3) also found wrong graph data. `from pkg import sub` linked to `pkg/__init__.py`, and packages from test-fixture manifests looked like real dependencies.
+- **Decision:**
+  - `_git(..., ceiling=)` sets `GIT_CEILING_DIRECTORIES` so git never searches at or above the workspace folder.
+  - `_refresh_clone` only acts when `<dest>/.git/HEAD` exists and `git rev-parse --show-toplevel` equals the clone folder. Otherwise it removes the folder and clones afresh.
+  - `_remove_tree` clears read-only flags (`onexc`) so leftovers are really deleted.
+  - A regression test recreates the incident in a temp folder (an outer repo with a broken clone inside it) and asserts that the outer repo's HEAD, remotes and files are untouched.
+  - Builder: `from pkg import a, b` links to `pkg/a.py` and `pkg/b.py` when they exist; `@/` aliases fall back to a unique suffix match; dependencies declared only by manifests under test paths get `meta.fixture = true` (`TEST_PATH_RE` moved to `archon/graph/paths.py`).
+- **Alternatives considered:**
+  - Always delete and re-clone: simple, but re-downloads every time, and deletion was the original failure.
+  - Moving the workspace outside the repository: right long-term, but changes the configuration and existing data paths; the ceiling and toplevel check make the location safe either way.
+  - `git -C`: still uses discovery, so it does not prevent walking up.
+- **Why this one:** two independent guards (git cannot look up, and nothing mutates unless the top level is the clone folder) make the destructive path impossible, while keeping fast in-place refreshes.
+- **Consequences:** re-indexing cloned repos works on Windows. Any future git command in workspace clones must go through `_git(..., ceiling=)`. Python package imports now point at the real modules, so `__init__.py` files stop collecting arrows.

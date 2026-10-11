@@ -10,12 +10,10 @@ from pathlib import Path
 from archon.analysis.findings import Finding
 from archon.db.models import Repository
 from archon.graph.model import Node, NodeKind
+from archon.graph.paths import TEST_PATH_RE
 from archon.graph.query import RepoGraph
 from archon.ingest.scanner import read_text
 
-TEST_PATH_RE = re.compile(
-    r"(^|/)(tests?|__tests__|spec|e2e)(/|$)|(^|/)test_[^/]+\.py$|[._](test|spec)\.[jt]sx?$|_test\.go$|Test\w*\.java$"
-)
 _IDENT_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
 
 

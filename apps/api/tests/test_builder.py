@@ -103,3 +103,27 @@ def test_ts_path_aliases_resolve_inside_a_monorepo_app():
     assert b._resolve_js(page, "~/components/ui").path == "apps/web/src/components/ui.tsx"
     assert b._resolve_js(page, "@/root").path == "src/root.ts"  # falls back to the repo root
     assert b._resolve_js(page, "@/missing") is None
+
+
+def test_from_package_import_submodule_links_to_the_submodule(tmp_path: Path):
+    """`from pkg import sub` is an import of pkg/sub.py, not of pkg/__init__.py."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "sub.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "main.py").write_text("from pkg import sub\n\n\ndef run():\n    return sub.f()\n")
+    _, g, _ = _graph(tmp_path)
+    pairs = {(s.path, t.path) for s, t in _edges(g, EdgeKind.IMPORTS) if t.kind == NodeKind.FILE}
+    assert ("main.py", "pkg/sub.py") in pairs
+    assert ("main.py", "pkg/__init__.py") not in pairs
+
+
+def test_packages_declared_only_by_test_fixtures_are_flagged(tmp_path: Path):
+    (tmp_path / "requirements.txt").write_text("fastapi\n")
+    fixture = tmp_path / "tests" / "fixtures" / "app"
+    fixture.mkdir(parents=True)
+    (fixture / "package.json").write_text('{"dependencies": {"express": "^4.0.0"}}')
+    (tmp_path / "main.py").write_text("import fastapi\n")
+    _, g, _ = _graph(tmp_path)
+    deps = {n.name: n.meta.get("fixture") for n in g.nodes.values() if n.kind == NodeKind.DEPENDENCY}
+    assert deps.get("fastapi") is False
+    assert deps.get("express") is True
