@@ -19,7 +19,7 @@ export function NodePanel({ repoId, nodeId, onClose, onSelect, onFocus }: Props)
   const { data, error, loading } = useApi(`node:${repoId}:${nodeId}`, () => api.graph.node(repoId, nodeId));
 
   return (
-    <aside className="w-[380px] shrink-0 border-l border-line bg-elev flex flex-col min-h-0">
+    <aside className="h-full w-full border-l border-line bg-elev flex flex-col min-h-0">
       <div className="flex items-center gap-2 px-3 py-2 border-b border-line">
         <span className="text-xs text-faint uppercase tracking-wider">Node</span>
         <div className="ml-auto flex items-center gap-1">

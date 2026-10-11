@@ -1,17 +1,13 @@
 /**
- * The laid-out hierarchy the map renderer draws (decisions.md D-024, D-026, D-027).
+ * The laid-out hierarchy the map renderer draws (decisions.md D-024, D-026, D-027, D-029).
  * Built from the view model (nesting) and the worker's rectangles (positions and sizes).
  */
 import { KIND_STYLE, type NodeKind } from "@/lib/api";
 import type { Positions } from "./layoutClient";
+import { boxPalette, chipPalette, MAP_BG, type BoxPalette, type ChipPalette } from "./palette";
 import type { ViewModel } from "./viewModel";
 
-export const BG = "#0f1218";
-
-/** Soft hues for top-level components; folders and files inside inherit their component's hue. */
-const COMPONENT_HUES = ["#8fb8de", "#a8d5ba", "#c3b1e1", "#f0c7a2", "#e6a9b8", "#9fd3cf", "#b6c2e8", "#e3d6a0"];
-/** Areas that are not code of their own (packages, loose files) stay neutral. */
-export const NEUTRAL_HUE = "#b9b4a6";
+export const BG = MAP_BG;
 
 export interface MapNode {
   id: string;
@@ -24,15 +20,23 @@ export interface MapNode {
   depth: number;
   children: string[];
   ancestors: string[]; // nearest first
-  rect: { x: number; y: number; w: number; h: number; header?: number };
-  hue: string; // component hue (boxes) or kind colour (leaves)
+  rect: { x: number; y: number; w: number; h: number; header?: number; pad?: number };
+  hue: string; // title colour (boxes) or kind colour (leaves): the node's "own" colour for rings and keys
   area: string; // id of the top-level box this node belongs to
+  areaIndex: number; // position of the area in the stable colour order (-1 for neutral areas)
   neutral: boolean; // packages / loose-files area: drawn as a quiet neutral surface
+  pal: BoxPalette; // box colours (for leaves: their parent's, so chips sit on the right surface)
+  chip: ChipPalette | null; // leaves
   summary: string[]; // ranked parts: ["10 endpoints", "12 functions", "2 classes"]
   lines: number;
   isType: boolean;
   quiet: boolean;
+  priv: boolean;
+  isComponent: boolean;
+  detail: string;
+  detail2: string;
   files: number; // files inside (boxes)
+  bandWorld: number; // open-box title band in world units, shared by siblings
 }
 
 export interface MapEdge {
@@ -62,6 +66,10 @@ export function withAlpha(hex: string, alpha: number): string {
 }
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : word.endsWith("s") ? "es" : "s"}`;
+const median = (xs: number[]) => {
+  const s = [...xs].sort((a, b) => a - b);
+  return s.length ? s[Math.floor(s.length / 2)] : 0;
+};
 
 /** What a box holds, most informative first. Containers of folders/files lead with structure; files and
  *  classes lead with what they expose (endpoints, tables), then their symbols by count. */
@@ -75,8 +83,7 @@ function summarize(n: MapNode, nodes: Map<string, MapNode>): string[] {
       else if (k.kind === "class") {
         if (k.isType) c.type++;
         else c.cls++;
-      }
-      else if (k.kind === "function" || k.kind === "method") c.fn++;
+      } else if (k.kind === "function" || k.kind === "method") c.fn++;
       else if (k.kind === "endpoint") c.ep++;
       else if (k.kind === "table") c.tbl++;
       else if (k.kind === "dependency") c.dep++;
@@ -108,6 +115,7 @@ export function buildMapModel(view: ViewModel, pos: Positions): MapModel {
     if (!kids.has(v.parent)) kids.set(v.parent, []);
     kids.get(v.parent)!.push(v.id);
   }
+  const placeholder = boxPalette(0, 0, true);
   for (const v of view.nodes) {
     const r = pos[v.id];
     if (!r) continue;
@@ -125,12 +133,20 @@ export function buildMapModel(view: ViewModel, pos: Positions): MapModel {
       rect: r,
       hue: "",
       area: v.id,
+      areaIndex: -1,
       neutral: false,
+      pal: placeholder,
+      chip: null,
       summary: [],
       lines: v.lines,
       isType: !!v.isType,
       quiet: !!v.quiet,
+      priv: !!v.priv,
+      isComponent: !!v.isComponent,
+      detail: v.detail ?? "",
+      detail2: v.detail2 ?? "",
       files: 0,
+      bandWorld: 0,
     });
   }
   for (const n of nodes.values()) {
@@ -144,14 +160,40 @@ export function buildMapModel(view: ViewModel, pos: Positions): MapModel {
     const k = nodes.get(id)!.kind;
     return k === "group" || k === "files";
   };
-  // Hues by name, so an area keeps its colour across re-indexes and layout changes.
+  // Colours by area name, so an area keeps its colour across re-indexes and layout changes.
   const coded = roots.filter((r) => nodes.get(r)!.box && !isNeutralArea(r)).sort((a, b) => nodes.get(a)!.label.localeCompare(nodes.get(b)!.label));
-  const hueOf = new Map(coded.map((id, i) => [id, COMPONENT_HUES[i % COMPONENT_HUES.length]]));
+  const indexOf = new Map(coded.map((id, i) => [id, i]));
   for (const n of nodes.values()) {
     n.neutral = isNeutralArea(n.area);
+    n.areaIndex = n.neutral ? -1 : (indexOf.get(n.area) ?? -1);
+  }
+  for (const n of nodes.values()) {
     const kindColor = KIND_STYLE[n.kind as NodeKind]?.color ?? "#9aabc4";
-    n.hue = n.box ? (n.neutral ? NEUTRAL_HUE : (hueOf.get(n.area) ?? kindColor)) : kindColor;
-    if (n.box) n.summary = summarize(n, nodes);
+    if (n.box) {
+      n.pal = boxPalette(Math.max(0, n.areaIndex), n.depth, n.neutral || n.areaIndex < 0);
+      n.hue = n.pal.title;
+      n.summary = summarize(n, nodes);
+    } else {
+      const parent = n.parent ? nodes.get(n.parent) : undefined;
+      const surface = parent ? boxPalette(Math.max(0, parent.areaIndex), parent.depth, parent.neutral || parent.areaIndex < 0) : boxPalette(0, 0, true);
+      n.pal = surface;
+      n.chip = chipPalette(kindColor, surface.frameL, n.priv);
+      n.hue = kindColor;
+    }
+  }
+  // Title size shared by siblings, so the open boxes of one level carry matching titles.
+  const groups = new Map<string, MapNode[]>();
+  for (const n of nodes.values()) {
+    if (!n.box) continue;
+    const key = n.parent && nodes.has(n.parent) ? n.parent : "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(n);
+  }
+  for (const sibs of groups.values()) {
+    const bandWorld = median(sibs.map((n) => (n.rect.header ?? 14) + (n.rect.pad ?? 10) * 0.5));
+    for (const n of sibs) {
+      n.bandWorld = bandWorld;
+    }
   }
   // One root holding most of the code (e.g. a single `src`) would make the first zoom step reveal nothing:
   // the renderer opens it at the overview instead.

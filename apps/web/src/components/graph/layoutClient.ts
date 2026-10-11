@@ -13,6 +13,8 @@ import type { Rect } from "./layoutCore";
 export type Positions = Record<string, Rect>;
 
 const CACHE_LIMIT = 24;
+// bump when the layout algorithm changes, so cached positions from the old one are not reused
+const LAYOUT_VERSION = 3;
 const cache = new Map<string, Positions>();
 let worker: Worker | null = null;
 let busy = false;
@@ -26,8 +28,8 @@ export function viewKey(v: ViewModel): string {
     for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
   };
   for (const n of [...v.nodes].sort((a, b) => (a.id < b.id ? -1 : 1))) mix(`${n.id}|${n.parent ?? ""}|${n.w}|${n.h}|${n.sortKey}`);
-  for (const e of [...v.edges].map((x) => `${x.source}>${x.target}`).sort()) mix(e);
-  return `${v.nodes.length}:${v.edges.length}:${(h >>> 0).toString(36)}`;
+  for (const e of [...v.edges].map((x) => `${x.source}>${x.target}:${x.kind}`).sort()) mix(e);
+  return `v${LAYOUT_VERSION}:${v.nodes.length}:${v.edges.length}:${(h >>> 0).toString(36)}`;
 }
 
 function spawn(): Worker {
@@ -58,7 +60,7 @@ export function computeLayout(v: ViewModel, key: string): Promise<Positions> {
   const hit = cache.get(key);
   if (hit) return Promise.resolve(hit);
   if (busy && worker) {
-    // Abandon the stale layout: killing the worker is the only way to stop a running fCoSE pass.
+    // Abandon the stale layout: killing the worker is the only way to stop a running pass.
     worker.terminate();
     worker = null;
     for (const [, p] of pending) p.reject(new Error("superseded"));
@@ -68,8 +70,8 @@ export function computeLayout(v: ViewModel, key: string): Promise<Positions> {
   const id = ++seq;
   const req: LayoutRequest = {
     id,
-    nodes: v.nodes.map((n) => ({ id: n.id, parent: n.parent, w: n.w, h: n.h, size: n.size, sortKey: n.sortKey })),
-    edges: v.edges.map((e) => [e.source, e.target]),
+    nodes: v.nodes.map((n) => ({ id: n.id, parent: n.parent, w: n.w, h: n.h, size: n.size, sortKey: n.sortKey, kind: n.kind, priv: n.priv })),
+    edges: v.edges.map((e) => [e.source, e.target, e.kind]),
   };
   return new Promise<Positions>((resolve, reject) => {
     pending.set(id, {

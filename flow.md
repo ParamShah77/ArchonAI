@@ -78,28 +78,27 @@ apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /
   /repos/[id]                          layout.tsx awaits params -> <RepoShell id>
                                          RepoShell: GET /repos/{id} (polls while not ready), provides RepoContext, tabs
                                          page.tsx -> <RepoOverview/>: stats from repo row, GET /repos/{id}/architecture
-  /repos/[id]/map                      page.tsx -> <GraphExplorer/>  (semantic zoom D-024; renderer D-026, D-027)
+  /repos/[id]/map                      page.tsx -> <GraphExplorer/>  (semantic zoom D-024; renderer D-026, D-027, D-029)
                                          GET /repos/{id}/graph?level=all  (whole hierarchy, once)
                                          -> <MapCanvas/>: viewModel.buildView() (nesting; wrapper and single-file
                                             folders dissolved; "Other files" groups; packages box; short method
-                                            names) -> worker layoutCore.runLayout() (rows per box, row width chosen
-                                            for screen shape; top-level blocks packed the same way) -> rectangles
-                                            -> mapModel.buildMapModel() (tree, areas, hues by name, ranked summaries,
-                                            dominant root) -> onKey() -> <MapLegend/>; place() -> goHome()
-                                         d3-zoom (wheel / pinch / drag) -> target transform (+ cursor anchor) ->
-                                            requestDraw()
-                                         draw() -> renderFrame() each animation frame while moving or settling:
-                                            time-based glide toward target about the anchor -> walk boxes from the
-                                            roots: openness follows size while scaling, settles to 0/1 at rest
-                                            (hysteresis) -> frame fills -> resting lines -> box bodies + borders ->
-                                            symbol chips -> focused lines (on top) -> label queue (titles, names,
-                                            collision-checked pills) -> rings -> breadcrumb -> hover re-pick
-                                         click -> pick() -> ring now, onSelect after 220 ms -> <NodePanel/>
-                                            GET /repos/{id}/nodes/{node_id}; ?node= via history.replaceState
-                                         dblclick tile / breadcrumb / search -> zoomTo(id) -> fly() (d3 transition
-                                            from the drawn view, duration from path length); dblclick empty -> zoomOut()
-                                         ?node=, ?focus= -> zoomTo; ?prefix= -> zoomToPath (all boxes under it);
-                                            ?debug=map -> frame-time / settle overlay
+                                            names; symbol details) -> worker layoutCore.runLayout(nodes, edges with
+                                            kinds): call-flow layers / left-aligned columns / screen-shaped rows ->
+                                            rectangles -> mapModel.buildMapModel() (tree, areas, OKLCH palettes,
+                                            ranked summaries, dominant root) -> onKey() -> <MapLegend/>; goHome()
+                                         d3-zoom (wheel / pinch / drag), keys (wrapper keydown), <MapControls/> ->
+                                            target transform -> requestDraw()
+                                         renderFrame(): glide -> openness (vs the visible rect; settles at rest)
+                                            -> emphasis easing -> frame fills + header strips -> resting lines
+                                            (buildCurves: stand-ins, budget, edge fade, routing at rest) -> box
+                                            bodies -> chips / cards -> sockets -> labels -> selection veil + its
+                                            world redrawn -> focused lines (direction colours) -> glint -> rings ->
+                                            landing pulse -> breadcrumb -> hover re-pick
+                                         click -> pick() (tiles, chips, title bands) -> ring now, onSelect after
+                                            220 ms -> panel slides over the map; ensureVisible(); <NodePanel/>
+                                         dblclick -> onDoubleClick(): into tile / ping chip / step out; search
+                                            Enter -> zoomTo(id, {pulse: 2}); Esc clears; / focuses search
+                                         ?node=, ?focus= -> zoomTo; ?prefix= -> zoomToPath; ?debug=map overlay
 ```
 Data hook: `src/lib/hooks.ts::useApi(key, fetcher, {pollMs, pollWhile})` — refetches when `key` changes;
 `loading` is true only until the first result for the current key arrives.
@@ -209,6 +208,30 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-11 (later) — Code Map batch 2
+- The owner said "next": tier 2 of `docs/code-map-plan.md` implemented with the recommended defaults (decision D-029).
+- New `apps/web/src/components/graph/palette.ts`: OKLCH/OKLab conversion, `mixOklab`, `contrast`, map tokens, `boxPalette(index, depth, neutral)`, `chipPalette()`, focus direction colours.
+- New `MapControls.tsx`: zoom +/−, fit current, fit all.
+- `MapCanvas.tsx` reworked:
+  - drawing: `drawFrameFill` (header strip), `drawBox` (palette, file corner, class border), `queueTileName` (tile-sized names), `queueFrameTitle` (sibling title size, ◆ for classes, clickable underline);
+  - lines: `buildCurves` (budget, edge fade, direction colours, `route` + `buildObstacles`, cached choices), `strokeCurve` (casing), `drawSockets`;
+  - focus: `drawVeil`, `drawGlint`, `drawPulse`, `drawRing` (grow-in);
+  - symbols: `chipGeom` (capped chips, cards), `drawGlyph`, `drawCard`;
+  - interaction: `pick` (title bands), `onDoubleClick`, keyboard handler, `zoomBy`, `panBy`, `upOneLevel`, `fitCurrent`, `ensureVisible`, `visibleRect` (`insetRight`, `insetBottom`), translate extent, centre kept on resize, app font.
+- `mapText.ts`: `FontSpec`, half-pixel width cache.
+- `mapModel.ts`: `pal`, `chip`, `areaIndex`, `priv`, `isComponent`, `detail`/`detail2`, sibling `bandWorld`.
+- `viewModel.ts`: `details()`, `priv` / `isComponent`; sortKey puts public before private.
+- `layoutCore.ts`: `layerLeaves` (call-flow layers), `bestGrid` (columns), scaled gaps and padding, `equaliseRows`, edges with kinds. `layoutClient.ts`: edge kinds sent to the worker, `LAYOUT_VERSION`.
+- `GraphExplorer.tsx`: panel slides over the map, Esc closes it, `/` focuses search, search ↑/↓/Enter with 2 pings, controls, and the key on palette tokens with a new hint.
+- `NodePanel.tsx`: fills its overlay container.
+- `lib/api.ts`: file kind colour `#8bc7e5`.
+- Verified at 1362×928 (simulated visible tab, canvas snapshots):
+  - overview, archon (open, wires plugging in), services, reasoning.py (call flow), hover, selection veil with amber/periwinkle lines and glint, DebtAnalyzer, deep-zoom cards, web/components, and portfolio Projects.jsx with `</>` components;
+  - the panel opens over the map with the canvas still 1362 px; Esc closes it;
+  - `+`, Backspace, `0`, zoom buttons, title hover/click, search Enter (flight then 2 pings);
+  - frames p50 2.2 ms, p95 5.6 ms;
+  - lint, type-check, build and 36 backend tests pass.
 
 ### Session 2026-10-11 — Code Map design review: step 0 + batch 1
 - Ran an 8-lens design review with adversarial verification of the map (85/90 proposals survived). Plan and critic notes saved to `docs/code-map-plan.md`. The owner said "continue with plan": step 0 + batch 1 implemented (decisions D-027, D-028).

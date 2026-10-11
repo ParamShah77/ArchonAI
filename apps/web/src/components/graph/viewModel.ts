@@ -38,6 +38,10 @@ export interface ViewNode {
   path: string;
   lines: number; // lines of code (0 when unknown)
   isType?: boolean; // TypeScript interface (stored as a class by the extractor)
+  priv?: boolean; // Python private helper (single leading underscore, not a dunder)
+  isComponent?: boolean; // React component: PascalCase function in a .jsx/.tsx file
+  detail?: string; // second line on a symbol card: "(self, repo_id: str) · L42–88 · async", "GET /repos", "1.2.0"
+  detail2?: string; // third line: decorators
   quiet?: boolean; // a file with no symbols and no relationships (e.g. an empty __init__.py)
   synthetic?: boolean;
 }
@@ -54,6 +58,31 @@ export interface ViewEdge {
 export interface ViewModel {
   nodes: ViewNode[];
   edges: ViewEdge[];
+}
+
+/** Extra lines for a symbol card at deep zoom. */
+function details(n: GraphNode): { detail?: string; detail2?: string } {
+  const m = n.meta;
+  const range = n.start_line > 0 ? `L${n.start_line}${n.end_line > n.start_line ? `–${n.end_line}` : ""}` : "";
+  if (n.kind === "function" || n.kind === "method") {
+    const params = typeof m.params === "string" ? m.params : "";
+    const decos = Array.isArray(m.decorators) ? (m.decorators as string[]) : [];
+    return {
+      detail: [params, range, m.async === true ? "async" : ""].filter(Boolean).join(" · ") || undefined,
+      detail2: decos.length ? decos.map((d) => (d.startsWith("@") ? d : `@${d}`)).join(" ") : undefined,
+    };
+  }
+  if (n.kind === "endpoint") return { detail: [m.method, m.route].filter(Boolean).join(" ") || undefined, detail2: range || undefined };
+  if (n.kind === "dependency") return { detail: [m.version, m.dev ? "dev" : "", m.ecosystem].filter(Boolean).join(" · ") || undefined };
+  if (n.kind === "table") {
+    const cols = Array.isArray(m.columns) ? (m.columns as string[]) : [];
+    return { detail: [m.model ? `model ${m.model}` : "", cols.length ? `${cols.length} columns` : ""].filter(Boolean).join(" · ") || undefined };
+  }
+  if (n.kind === "class") {
+    const bases = Array.isArray(m.bases) ? (m.bases as string[]) : [];
+    return { detail: [bases.length ? `(${bases.join(", ")})` : "", range].filter(Boolean).join(" · ") || undefined };
+  }
+  return {};
 }
 
 export function buildView(g: Graph): ViewModel {
@@ -226,6 +255,7 @@ export function buildView(g: Graph): ViewModel {
     const size = Math.round(12 + (MAX_SIZE - 12) * Math.sqrt(Math.min(d, 40) / 40));
     const { label, full } = labelOf(n);
     const chars = Math.min(label.length, 24);
+    const priv = (n.kind === "function" || n.kind === "method") && /^_(?!_)/.test(n.name);
     return {
       id: n.id,
       label,
@@ -236,10 +266,13 @@ export function buildView(g: Graph): ViewModel {
       w: Math.max(size, chars * 6.7 + 34), // room for the chip: kind dot + monospace name
       h: LEAF_H,
       major: isParent.has(n.id) || n.kind === "endpoint" || n.kind === "table" || (d > 0 && d >= hubCut),
-      sortKey: `${KIND_ORDER[n.kind] ?? 9}${label.toLowerCase()}`,
+      sortKey: `${KIND_ORDER[n.kind] ?? 9}${priv ? 1 : 0}${label.toLowerCase()}`, // public before private
       path: n.path,
       lines: n.end_line > 0 ? n.end_line - Math.max(1, n.start_line) + 1 : 0,
       isType: n.meta.interface === true || undefined,
+      priv: priv || undefined,
+      isComponent: (n.kind === "function" && /^[A-Z]/.test(n.name) && /\.(jsx|tsx)$/.test(n.path)) || undefined,
+      ...details(n),
       quiet: (n.kind === "file" && !isParent.has(n.id) && d === 0) || undefined,
       synthetic: n.meta.synthetic === true || undefined,
     };

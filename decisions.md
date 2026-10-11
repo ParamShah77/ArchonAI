@@ -352,3 +352,56 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
 - **Alternatives considered:** parsing every `tsconfig.json` / `jsconfig.json` `paths` mapping (exact, but needs JSONC parsing, `extends` chains and baseUrl handling; a later refinement if repos with unusual aliases appear); a suffix match over all files (ambiguous when two apps have the same `lib/api.ts`).
 - **Why this one:** it matches the near-universal `@/* → ./src/*` convention with a few lines of code and prefers the importing app's own files, so it cannot cross apps when the same path exists twice.
 - **Consequences:** after re-indexing ArchonAI, apps/web has 69 file-to-file import edges (was 0). Aliases that map elsewhere (e.g. `@/` to `app/`) still need the tsconfig-aware version. Test: `test_ts_path_aliases_resolve_inside_a_monorepo_app`.
+
+## D-029 — Code map, batch 2: perceptual palette, focus on click, lines that plug in, call-flow files, panel over the map, actions, symbol cards
+- **Date:** 2026-10-11
+- **Status:** Accepted. It amends D-027 and supersedes D-024's palette (tint() in sRGB) and D-023's "leaves by name" order inside files. The plan is in `docs/code-map-plan.md` (tier 2).
+- **Context:** The owner asked for the next step ("next") without answering the open questions, so the recommended defaults were used:
+  - call-flow order inside files;
+  - dimming only on click (the critic warned that hover-dimming strobes);
+  - the strongest folder links always shown at rest.
+- **Decision:**
+  - **Palette (`palette.ts`, OKLCH):** each area gets an equal-lightness hue in cool-first order (warm hues only from the 7th area, toned down). The open-surface lightness ramp stops at depth 2, so a closed tile always stands ≥1.56× brighter than its surface. Open boxes get a faint header strip. Files show a folded corner; classes get a ◆ title and a border leaning to the class colour. The file kind colour is now oklch(.80 .075 230) (deuteranopia-safe against class). All text is ≥5.5:1 contrast, names ≥7:1 (checked with `contrast()`).
+  - **Type:** text widths are cached at half-pixel buckets and scaled, so zoom frames hit the cache. Canvas text uses the app's own font family. A tile's name size comes from the tile's own size; one sibling group shares a title size of 13–16 px. Summaries are 12 px in frames and only shown with names of 14 px or more on tiles.
+  - **Lines:**
+    - Resting lines between tiles enter each tile a little and are redrawn over it (source dot + arrowhead), so a wire visibly plugs in.
+    - When the camera settles, resting lines are routed around unrelated tiles and chips: other side, then a wider bow, else hidden. The choice is cached while moving, so lines never flip mid-zoom.
+    - Only the 10 strongest folder/file links show fully, the next 8 taper, and the rest appear on focus. Lines fade over 120 px at the screen edge.
+    - Focused lines get a dark casing.
+  - **Focus:**
+    - A selection veils everything else at 30% (an open selected box stays unveiled) and redraws its own world on top: the item, its neighbours, and name pills for up to 12 far neighbours.
+    - Its lines use direction colours: amber "uses", periwinkle "used by", rose "both". The colours are blended in OKLab as the emphasis eases (in 60 ms, out 110 ms).
+    - A new selection sends one glint along up to 6 lines, skipped when more than 12 are lit or under reduced motion.
+    - Hover only brightens and colours lines (no veil).
+  - **Layout (`layoutCore.ts`):**
+    - Files with 3+ internal calls/extends/implements/exposes are laid out in call-flow layers: longest path from entry points, endpoints and tables on top, deterministic cycle breaking, 4 barycenter sweeps, public before private. Small layers can share a row.
+    - Other symbol lists become left-aligned columns.
+    - Gaps between tiles scale with the tiles (6% of the median side, 14–80). Padding and header scale with the box.
+    - Tiles in a row share top and bottom edges (heights within 1.5×), and nearly-full rows fill out.
+    - The worker now receives edge kinds; `LAYOUT_VERSION` invalidates old caches.
+  - **Panel:** the details panel slides over the map (220 ms in, 180 ms out) instead of resizing it. Fits, openness and the breadcrumb use the visible part of the map (minus the panel and the key). A selection under the panel is panned into view by the smallest move. A window resize keeps the centre.
+  - **Actions:**
+    - Open boxes' title bands are clickable: hover underlines them and lights their outside lines, click selects.
+    - Double-click: into a tile; on a chip, select and ping; on a title or empty space, step out (fitting the room first if it is not fitted).
+    - Keys on the focusable map: Backspace up, Esc clear, Enter fly in, 0/Home fit all, +/− zoom, arrows pan (Shift for bigger steps). `/` focuses search, and search supports ↑/↓/Enter.
+    - Zoom buttons (+, −, fit current, fit all) sit in the corner and move aside for the panel.
+    - The camera cannot be flung away (translate extent = map bounds + 25%).
+    - After a flight lands, the target pings once (twice from search).
+  - **Symbols:** chips stop growing at 30 px. Deep zoom fades in a card sized to its content: name, signature · line range · async, decorators. Endpoints show method and route, packages version and ecosystem, classes their bases. Each kind has a glyph (● ◆ ▶ ▭ tag). Private Python helpers are quieter (hollow mark, muted name). React components get a `</>` mark.
+- **Alternatives considered:**
+  - Hover-dimming after a dwell (strobes while sweeping across dense files).
+  - The plan's sibling-median tile name size (made big tiles' names tiny next to many small siblings; tile-dimension sizing already gives equal tiles equal names).
+  - Barycenter-first order within layers (measured 103 vs 83 crossings in reasoning.py).
+  - Edge bundling (curves cross unrelated tiles).
+  - A minimap (more chrome).
+  - Recolouring all kind colours app-wide (badges everywhere would change).
+- **Why this one:** each change targets a measured defect or a missing action from the review, keeps the calm direction, and stays cheap. Measured at 1362×928 in a simulated visible tab:
+  - frames p50 2.2 ms, p95 5.6 ms;
+  - downward call lines 181 → 279 and upward 109 → 28 across files;
+  - fitted boxes open fully; 0 half-open boxes at rest;
+  - all text contrast ≥ 5.5:1.
+- **Consequences:**
+  - Call-flow order replaces alphabetical order inside files with internal calls; names are still found via search or the tooltip.
+  - Folder links beyond the strongest 18 appear only on focus.
+  - The panel now covers the right of the map instead of shrinking it.
+  - Tier 3 items remain open: Health lens, hover cards with more facts, edge tags at the screen edge, right-click actions, backend relationship fixes, bundled exits.

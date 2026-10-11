@@ -347,7 +347,7 @@ export const api = {
 export const KIND_STYLE: Record<NodeKind, { color: string; label: string; shape: string }> = {
   repo: { color: "#dfe4ec", label: "Repository", shape: "round-rectangle" },
   directory: { color: "#9aabc4", label: "Folder", shape: "round-rectangle" },
-  file: { color: "#8ab9d6", label: "File", shape: "round-rectangle" },
+  file: { color: "#8bc7e5", label: "File", shape: "round-rectangle" }, // oklch(.80 .075 230): distinct from class under deuteranopia
   module: { color: "#8ab9d6", label: "Module", shape: "round-rectangle" },
   class: { color: "#b8a7db", label: "Class", shape: "round-rectangle" },
   function: { color: "#9ccfac", label: "Function", shape: "ellipse" },

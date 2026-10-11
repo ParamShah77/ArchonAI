@@ -8,14 +8,16 @@ import type { GraphNode } from "@/lib/api";
 import { useApi, useDebounced } from "@/lib/hooks";
 import { useRepo } from "@/components/RepoShell";
 import { MapCanvas, type Crumb, type MapController, type MapKey } from "@/components/graph/MapCanvas";
+import { MapControls } from "@/components/graph/MapControls";
+import { MAP_BG } from "@/components/graph/palette";
 import { NodePanel } from "@/components/graph/NodePanel";
 import { ErrorBox, KindBadge, Spinner } from "@/components/ui";
 
-const MAP_BG = "#0f1218"; // same as the canvas, so nothing flashes before the first frame
 const KEY_OPEN = "archon.map.key.open";
+const PANEL_W = 380; // details panel width (it slides over the map)
 
 /**
- * Semantic-zoom code map (decisions.md D-024, D-026, D-027). One request loads the whole hierarchy; the canvas
+ * Semantic-zoom code map (decisions.md D-024, D-026, D-027, D-029). One request loads the whole hierarchy; the canvas
  * decides how much detail to draw for the current zoom. Deep links from other pages (`?node=`, `?focus=`,
  * `?prefix=`) fly the camera to that part of the map.
  */
@@ -36,7 +38,15 @@ export function GraphExplorer() {
   const [q, setQ] = useState("");
   const dq = useDebounced(q);
   const ctrl = useRef<MapController | null>(null);
+  const [mapCtrl, setMapCtrl] = useState<MapController | null>(null);
   const [keyH, setKeyH] = useState(0);
+  const [active, setActive] = useState(0); // highlighted search result
+  const searchRef = useRef<HTMLInputElement>(null);
+  // the details panel slides over the map; the last node stays in it while it slides out (derived during
+  // render, the React way to keep state in step with a prop)
+  const [panelId, setPanelId] = useState<string | null>(selected);
+  if (selected && selected !== panelId) setPanelId(selected);
+  const panelOpen = !!selected;
 
   const { data: graph, error, loading } = useApi(`graph:${repo.id}:${repo.updated_at}:all`, () =>
     api.graph.view(repo.id, { level: "all" }),
@@ -72,7 +82,22 @@ export function GraphExplorer() {
   const prefix = sp.get("prefix");
   const onReady = useCallback((c: MapController) => {
     ctrl.current = c;
+    setMapCtrl(c);
   }, []);
+
+  // "/" jumps to search; Esc closes the details panel (keys are left alone while typing)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (e.key === "/") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      } else if (e.key === "Escape" && selected) setSelected(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected]);
   useEffect(() => {
     if (!graph || !prefix) return;
     const t = setTimeout(() => ctrl.current?.zoomToPath(prefix), 600);
@@ -81,8 +106,25 @@ export function GraphExplorer() {
 
   const pick = (n: GraphNode) => {
     setQ("");
+    setActive(0);
     setSelected(n.id);
-    ctrl.current?.zoomTo(n.id);
+    ctrl.current?.zoomTo(n.id, { pulse: 2 }); // two pings where it landed, so the eye finds it
+  };
+  const results = search.data?.results ?? [];
+  const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActive((i) => Math.min(results.length - 1, i + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive((i) => Math.max(0, i - 1));
+    } else if (e.key === "Enter" && results[active]) {
+      e.preventDefault();
+      pick(results[active]);
+    } else if (e.key === "Escape") {
+      setQ("");
+      e.currentTarget.blur();
+    }
   };
 
   return (
@@ -113,10 +155,15 @@ export function GraphExplorer() {
           <div className="relative ml-auto w-72 shrink-0">
             <Search size={14} className="absolute left-2.5 top-2.5 text-faint" />
             <input
+              ref={searchRef}
               className="input pl-8 py-1.5"
-              placeholder="Find a file, function, endpoint…"
+              placeholder="Find a file, function, endpoint…  ( / )"
               value={q}
-              onChange={(e) => setQ(e.target.value)}
+              onChange={(e) => {
+                setQ(e.target.value);
+                setActive(0);
+              }}
+              onKeyDown={onSearchKey}
             />
             {dq.length >= 2 && (
               <div className="absolute z-20 mt-1 w-[420px] right-0 card shadow-xl max-h-80 overflow-y-auto">
@@ -124,10 +171,11 @@ export function GraphExplorer() {
                   <div className="p-3 text-muted text-xs flex items-center gap-2"><Spinner /> Searching…</div>
                 )}
                 {search.data?.results.length === 0 && <div className="p-3 text-faint text-xs">No matches.</div>}
-                {search.data?.results.map((n) => (
+                {results.map((n, i) => (
                   <button
                     key={n.id}
-                    className="w-full text-left px-3 py-1.5 hover:bg-elev2 flex items-center gap-2 text-xs"
+                    className={`w-full text-left px-3 py-1.5 hover:bg-elev2 flex items-center gap-2 text-xs ${i === active ? "bg-elev2" : ""}`}
+                    onMouseEnter={() => setActive(i)}
                     onClick={() => pick(n)}
                   >
                     <KindBadge kind={n.kind} className="shrink-0" />
@@ -157,25 +205,38 @@ export function GraphExplorer() {
               onReady={onReady}
               onKey={setMapKey}
               insetBottom={keyH ? keyH + 16 : 0}
+              insetRight={panelOpen ? PANEL_W : 0}
             />
           )}
 
           {mapKey && <MapLegend mapKey={mapKey} open={keyOpen} onToggle={toggleKey} onHeight={setKeyH} />}
+          {graph && <MapControls ctrl={mapCtrl} right={panelOpen ? PANEL_W : 0} />}
+
+          {/* the details panel slides over the map: the map keeps its size, so nothing opens or jumps */}
+          {panelId && (
+            <div
+              aria-hidden={!panelOpen}
+              className={`absolute inset-y-0 right-0 z-20 transition-transform ease-out ${panelOpen ? "shadow-[-12px_0_24px_rgba(0,0,0,0.35)]" : "pointer-events-none"}`}
+              style={{
+                width: PANEL_W,
+                transform: panelOpen ? "translateX(0)" : `translateX(${PANEL_W + 24}px)`,
+                transitionDuration: panelOpen ? "220ms" : "180ms",
+              }}
+            >
+              <NodePanel
+                repoId={repo.id}
+                nodeId={panelId}
+                onClose={() => setSelected(null)}
+                onSelect={(id) => {
+                  setSelected(id);
+                  ctrl.current?.zoomTo(id, { pulse: 1 });
+                }}
+                onFocus={(id) => ctrl.current?.zoomTo(id, { pulse: 1 })}
+              />
+            </div>
+          )}
         </div>
       </div>
-
-      {selected && (
-        <NodePanel
-          repoId={repo.id}
-          nodeId={selected}
-          onClose={() => setSelected(null)}
-          onSelect={(id) => {
-            setSelected(id);
-            ctrl.current?.zoomTo(id);
-          }}
-          onFocus={(id) => ctrl.current?.zoomTo(id)}
-        />
-      )}
     </div>
   );
 }
@@ -195,11 +256,11 @@ function MapLegend({ mapKey, open, onToggle, onHeight }: { mapKey: MapKey; open:
   }, [onHeight, open]);
   return (
     <div ref={ref} className="absolute bottom-3 left-3 z-10 max-w-[min(560px,calc(100%-24px))]">
-      <div className="rounded-lg border border-line bg-[#0f1218]/92 px-3 py-2 text-[11px] text-muted backdrop-blur shadow-lg">
+      <div className="rounded-lg border border-line px-3 py-2 text-[11px] text-muted shadow-lg" style={{ background: `${MAP_BG}eb` }}>
         <button className="flex items-center gap-1.5 text-faint hover:text-fg w-full" onClick={onToggle} title={open ? "Hide the key" : "Show the key"}>
           {open ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
           <span>Key</span>
-          {!open && <span className="text-faint">· scroll to zoom · drag to pan · double-click to fly in or out</span>}
+          {!open && <span className="text-faint">· scroll to zoom · drag to pan · double-click to go in or out · / to search</span>}
         </button>
         {open && (
           <div className="mt-1.5 space-y-1.5">
@@ -232,7 +293,10 @@ function MapLegend({ mapKey, open, onToggle, onHeight }: { mapKey: MapKey; open:
                 ))}
               {mapKey.external && <LineSample label="uses a package" color="#a9b3c4" dash={[1.5, 5]} faint />}
             </Row>
-            <div className="text-faint">Scroll to zoom: detail appears as you go in · drag to pan · double-click to fly in, or on empty space to step out · click to inspect</div>
+            <div className="text-faint">
+              Scroll to zoom · drag to pan · click to inspect (its lines light up: amber = uses, periwinkle = used by) · double-click to go
+              in, on empty space or a title to step out · keys: Backspace up · 0 fit all · + − zoom · arrows pan · / search · Esc clear
+            </div>
           </div>
         )}
       </div>

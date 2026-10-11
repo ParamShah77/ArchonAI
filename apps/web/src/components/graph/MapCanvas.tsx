@@ -1,20 +1,18 @@
 "use client";
 
 /**
- * Smooth semantic-zoom code map, rendered on a 2D canvas (decisions.md D-026, D-027).
+ * Smooth semantic-zoom code map, rendered on a 2D canvas (decisions.md D-026, D-027, D-029).
  *
- * - Camera: d3-zoom for input (wheel, pinch, drag) and fly-to transitions. The drawn view eases toward
- *   d3's target with a time-based glide, zooming about the cursor, so it feels the same at any refresh rate.
- * - Detail: each box has an openness from its size on screen. While you zoom it follows the size
- *   continuously; once you stop it settles to fully open or fully closed (with hysteresis), so nothing
- *   rests half-open. Opening is one card: the tile body fades away over its frame while the name moves
- *   into the header and the children (with their names) fade in.
- * - Relationships: each code-level edge is spread over the nodes that currently stand in for its ends, so
- *   lines cross-fade from folder↔folder to function↔function. Lines in a calm neutral ink; colour and dash
- *   patterns only for the rarer kinds (extends, implements, exposes, queries); package lines are faint
- *   dotted threads. Lines of the hovered/selected item are drawn on top.
- * - Labels: drawn after everything else, kept inside the visible part of their box; small tiles get a name
- *   pill below them unless it would collide with another label (the tooltip then shows it).
+ * - Camera: d3-zoom for input (wheel, pinch, drag, keyboard) and fly-to transitions. The drawn view eases
+ *   toward d3's target with a time-based glide about the cursor.
+ * - Detail: a box's openness follows its on-screen size while you zoom and settles fully open or closed at
+ *   rest. Opening is one card: the tile body fades over its frame, the name moves into the header strip.
+ * - Relationships: code-level edges spread over the nodes that stand in for their ends. At rest: one calm
+ *   ink, the strongest folder links only, routed around unrelated tiles, plugged into their tiles, fading at
+ *   the screen edge. The selected item's lines are drawn on top in direction colours (amber = uses,
+ *   periwinkle = used by) over a soft veil; hovering lights its lines without the veil.
+ * - Labels: one queue drawn after shapes; titles stay in view; sibling tiles share a name size.
+ * - Symbols: chips that stay a sane size and turn into small cards (signature, lines, flags) at deep zoom.
  */
 import { useEffect, useRef, useState } from "react";
 import { pointer, select } from "d3-selection";
@@ -23,8 +21,9 @@ import { interpolateZoom } from "d3-interpolate";
 import "d3-transition";
 import { EDGE_STYLE, KIND_STYLE, type EdgeKind, type Graph, type NodeKind } from "@/lib/api";
 import { cachedLayout, computeLayout, viewKey } from "./layoutClient";
-import { BG, buildMapModel, NEUTRAL_HUE, tint, withAlpha, type MapModel, type MapNode } from "./mapModel";
-import { fitParts, fitSmart, measure } from "./mapText";
+import { buildMapModel, withAlpha, type MapModel, type MapNode } from "./mapModel";
+import { fitParts, fitSmart, fontOf, measure, type FontSpec } from "./mapText";
+import { FOCUS_BOTH, FOCUS_IN, FOCUS_OUT, MAP_BG, MAP_INK, MAP_MUTED, mixOklab } from "./palette";
 import { buildView, CHIP_H, isSynthetic } from "./viewModel";
 
 export interface Crumb {
@@ -33,9 +32,12 @@ export interface Crumb {
 }
 
 export interface MapController {
-  zoomTo: (id: string) => void;
+  zoomTo: (id: string, opts?: { pulse?: number }) => void;
   zoomToPath: (path: string) => void;
   reset: () => void;
+  upOneLevel: () => void;
+  zoomBy: (factor: number) => void;
+  fitCurrent: () => void;
 }
 
 /** What the legend should explain: only what this map actually draws. */
@@ -54,6 +56,7 @@ interface Props {
   onReady?: (ctrl: MapController) => void;
   onKey?: (key: MapKey) => void;
   insetBottom?: number; // px covered by an overlay at the bottom (the key): fits keep content above it
+  insetRight?: number; // px covered by the details panel on the right
 }
 
 // ---- tuning -----------------------------------------------------------------------------------------
@@ -65,19 +68,17 @@ const GLIDE_MS = 65; // time constant of the camera glide
 const RESUME_MS = 40; // how fast a settled box catches up with the zoom again
 const SETTLE_MS = 85; // how fast a box finishes opening/closing after you stop
 const SCALE_QUIET_MS = 180; // zoom counts as "still going" this long after the last scale change
-const MAX_ZOOM = 6;
-const SANS = "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+const MAX_ZOOM = 8;
+const MAX_CHIP = 30; // px: symbol chips stop growing here (deeper zoom shows a card instead)
 const MONO = "ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace";
-const TEXT = "#e6e9f0";
-const MUTED = "#a4adbe";
+let SANS = "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"; // replaced by the app's font
 const INK = "#a9b3c4"; // relationships at rest: one calm neutral
-const INK_FOCUS = "#d6deeb"; // relationships of the hovered / selected item
+const INK_FOCUS = "#d6deeb";
 const ACCENT = "#5aa9ff"; // selection (the app accent)
 const HOVER_RING = "#c9d3e3";
 const RARE_KINDS = new Set<string>(["extends", "implements", "exposes", "queries"]);
-const NEUTRAL_TOP = "#3b3a36";
-const NEUTRAL_BOTTOM = "#302f2c";
-const NEUTRAL_BORDER = "#6f6d66";
+const LINE_BUDGET = 10; // folder/file links shown at full strength at rest (more taper off, the rest on focus)
+const VEIL = 0.3; // how much a selection dims everything else
 
 const clamp = (x: number, a: number, b: number) => Math.min(b, Math.max(a, x));
 const smooth = (a: number, b: number, x: number) => {
@@ -85,6 +86,8 @@ const smooth = (a: number, b: number, x: number) => {
   return t * t * (3 - 2 * t);
 };
 const boxRadius = (sw: number, sh: number) => Math.min(14, Math.max(4, Math.min(sw, sh) * 0.06));
+const sans = (weight: number, size: number): FontSpec => ({ weight, size, family: SANS });
+const mono = (weight: number, size: number): FontSpec => ({ weight, size, family: MONO });
 
 /** CSS-style cubic-bezier easing. */
 function cubicBezier(x1: number, y1: number, x2: number, y2: number) {
@@ -142,6 +145,43 @@ interface Anchor {
   hh: number;
 }
 
+interface Pt {
+  x: number;
+  y: number;
+}
+
+interface Curve {
+  key: string;
+  a: NodeState;
+  b: NodeState;
+  p: Pt;
+  c: Pt;
+  q: Pt;
+  color: string;
+  alpha: number;
+  width: number;
+  dash: number[];
+  arrow: boolean;
+  touched: boolean;
+  sel: boolean; // touched by the selection (drawn over the veil, glints)
+  inA: boolean;
+  inB: boolean;
+}
+
+interface Obstacle {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  id: string;
+  anc: string[];
+}
+
+interface Obstacles {
+  cell: number;
+  grid: Map<string, Obstacle[]>;
+}
+
 type LayoutState =
   | { state: "idle" }
   | { state: "running"; items: number }
@@ -157,12 +197,13 @@ interface Debug {
   k: number;
 }
 
-export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey, insetBottom = 0 }: Props) {
+export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey, insetBottom = 0, insetRight = 0 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [layout, setLayout] = useState<LayoutState>({ state: "idle" });
   const [tip, setTip] = useState<{ x: number; y: number; node: MapNode } | null>(null);
   const [debug, setDebug] = useState<Debug | null>(null);
+  const [focusHint, setFocusHint] = useState(false);
 
   // Everything the frame loop needs lives in one mutable ref (no React re-render per frame).
   const S = useRef({
@@ -170,7 +211,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     target: zoomIdentity as ZoomTransform,
     view: { k: 1, x: 0, y: 0 } as View,
     glide: true,
-    anchor: null as { x: number; y: number } | null, // zoom focus point (the cursor for wheel zoom)
+    anchor: null as Pt | null, // zoom focus point (the cursor for wheel zoom)
     w: 0,
     h: 0,
     dpr: 1,
@@ -184,12 +225,22 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     states: new Map<string, NodeState>(),
     anim: new Map<string, { shown: number; open: boolean; seen: number }>(),
     labels: [] as Label[],
+    curves: [] as Curve[],
+    curveChoice: new Map<string, { sign: number; mul: number; skip: boolean }>(),
+    mixCache: new Map<string, string>(),
     hover: null as string | null,
+    hoverTitle: false, // the hover is on an open box's title band
     selected: null as string | null,
     selProp: null as string | null,
+    selAt: 0, // when the current selection was made (ring grow-in, glint)
+    emphSel: 0, // eased 0..1: how much the selection veils the rest
+    emphHov: 0,
+    pulse: null as { id: string; t0: number; count: number } | null,
     subtrees: new Map<string, Set<string>>(),
-    ptr: null as { x: number; y: number } | null,
+    classBorder: new Map<string, string>(),
+    ptr: null as Pt | null,
     tipShown: false,
+    focusHint: false,
     crumbKey: "",
     crumbIds: [] as string[],
     zoom: null as ZoomBehavior<HTMLCanvasElement, unknown> | null,
@@ -201,6 +252,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     frameMs: [] as number[],
     dbg: { boxes: 0, half: 0, settled: true },
     insetBottom: 0,
+    insetRight: 0,
     atHome: false, // camera still on the overview it was placed at (no user move yet)
   });
   const cb = useRef({ onSelect, onCrumbs, onReady, onKey });
@@ -215,10 +267,17 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
   }, [insetBottom]);
 
   useEffect(() => {
-    S.current.selected = selected;
-    S.current.selProp = selected;
-    requestDraw();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    S.current.insetRight = insetRight;
+    api.current.requestDraw();
+  }, [insetRight]);
+
+  useEffect(() => {
+    const s = S.current;
+    if (selected !== s.selected) s.selAt = performance.now();
+    s.selected = selected;
+    s.selProp = selected;
+    if (selected) setTimeout(() => api.current.ensureVisible(selected), 60);
+    api.current.requestDraw();
   }, [selected]);
 
   // ---- frame scheduling --------------------------------------------------------------------------
@@ -239,13 +298,24 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     return { sx: (r.x - r.w / 2) * v.k + v.x, sy: (r.y - r.h / 2) * v.k + v.y, sw: r.w * v.k, sh: r.h * v.k };
   }
 
+  /** The part of the canvas not covered by overlays (details panel, key). */
+  function visibleRect() {
+    const s = S.current;
+    const right = s.insetRight < s.w * 0.6 ? s.insetRight : 0;
+    const bottom = s.insetBottom < s.h * 0.35 ? s.insetBottom : 0;
+    return { x: 0, y: 0, w: s.w - right, h: s.h - bottom };
+  }
+
   /** How open a box should be for its current size on screen (continuous). */
   function openness(n: MapNode, sw: number, sh: number, forced: boolean): number {
     if (!n.box) return 0;
     if (forced) return 1;
     const s = S.current;
-    const area = (sw * sh) / Math.max(1, s.w * s.h);
-    const span = Math.max(sw / Math.max(1, s.w), sh / Math.max(1, s.h));
+    // measured against the part of the map you can see (not the key or the details panel), so a box flown
+    // into always opens
+    const vr = visibleRect();
+    const area = (sw * sh) / Math.max(1, vr.w * vr.h);
+    const span = Math.max(sw / Math.max(1, vr.w), sh / Math.max(1, vr.h));
     // the overview always starts closed: nothing opens until you zoom in past the home view
     const gate = smooth(s.homeK, s.homeK * 1.2, s.view.k);
     return gate * Math.max(smooth(OPEN_AREA[0], OPEN_AREA[1], area), smooth(OPEN_SPAN[0], OPEN_SPAN[1], span));
@@ -266,6 +336,14 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       s.subtrees.set(id, set);
     }
     return set;
+  }
+
+  /** The node itself if visible, otherwise the closed tile that currently stands in for it. */
+  function standIn(id: string): NodeState | null {
+    const s = S.current;
+    const n = s.model?.nodes.get(id);
+    if (!n) return null;
+    return [id, ...n.ancestors].map((x) => s.states.get(x)).find((st) => st && st.vis > 0.3 && (st.t < 0.5 || !st.n.box || st.n.id === id)) ?? null;
   }
 
   // ---- the frame ------------------------------------------------------------------------------------
@@ -305,12 +383,13 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     const dt = s.lastT ? Math.min(50, now - s.lastT) : 16;
     s.lastT = now;
     const visible = document.visibilityState === "visible";
+    const animate = visible && !s.reduced;
 
     // -- camera: ease the drawn view toward d3's target, zooming about the anchor (the cursor for wheel
     //    zoom), in log space so every notch feels the same; time-based so 60 Hz and 144 Hz feel alike
     const tv = s.target;
     const v = s.view;
-    const a = s.glide && visible && !s.reduced ? 1 - Math.exp(-dt / GLIDE_MS) : 1;
+    const a = s.glide && animate ? 1 - Math.exp(-dt / GLIDE_MS) : 1;
     const anc = s.anchor ?? { x: s.w / 2, y: s.h / 2 };
     const wvx = (anc.x - v.x) / v.k, wvy = (anc.y - v.y) / v.k;
     const wtx = (anc.x - tv.x) / tv.k, wty = (anc.y - tv.y) / tv.k;
@@ -333,14 +412,14 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     ctx.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
     ctx.globalAlpha = 1;
     ctx.setLineDash([]);
-    ctx.fillStyle = BG;
+    ctx.fillStyle = MAP_BG;
     ctx.fillRect(0, 0, s.w, s.h);
     drawGrid(ctx, v);
 
     // -- pass 0: openness (continuous while zooming, settled at rest) and visibility
     const states = new Map<string, NodeState>();
     const margin = 80;
-    let pending = false; // a box is still settling
+    let pending = false; // something is still easing
     let half = 0;
     const visit = (id: string, vis: number, da: number, forced: boolean) => {
       const n = model.nodes.get(id)!;
@@ -357,7 +436,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
         }
         an.open = an.open ? raw > CLOSE_AT : raw >= OPEN_AT;
         const goal = scaling ? raw : an.open ? 1 : 0;
-        if (isNew || !visible || s.reduced) an.shown = goal;
+        if (isNew || !animate) an.shown = goal;
         else if (scaling) an.shown += (raw - an.shown) * (1 - Math.exp(-dt / RESUME_MS));
         else if (!s.held) an.shown += (goal - an.shown) * (1 - Math.exp(-dt / SETTLE_MS));
         if (Math.abs(an.shown - goal) < 0.004) an.shown = goal;
@@ -376,26 +455,51 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     s.states = states;
     if (s.anim.size > states.size * 3 + 200) for (const [id, an] of s.anim) if (now - an.seen > 2000) s.anim.delete(id);
 
+    // -- emphasis: the selection veils the rest (eased in and out); hover only lights lines
+    const selSt = s.selected ? standIn(s.selected) : null;
+    const ease = (cur: number, goal: number) => {
+      if (!animate) return goal;
+      const tau = goal > cur ? 60 : 110;
+      const nv = cur + (goal - cur) * (1 - Math.exp(-dt / tau));
+      if (Math.abs(nv - goal) < 0.01) return goal;
+      pending = true;
+      return nv;
+    };
+    s.emphSel = ease(s.emphSel, selSt ? 1 : 0);
+    s.emphHov = ease(s.emphHov, s.hover && s.hover !== s.selected ? 1 : 0);
+
     const boxes = [...states.values()].filter((st) => st.n.box && st.onScreen).sort((x, y) => x.n.depth - y.n.depth);
     const leaves = [...states.values()].filter((st) => !st.n.box && st.onScreen && st.da > 0.01);
 
-    // -- pass 1: open surfaces (each box's frame fill, under everything inside it)
+    // -- pass 1: open surfaces + header strips
     for (const st of boxes) if (st.t > 0.005 && st.da > 0.01) drawFrameFill(ctx, st);
-    // -- pass 2: relationships (the focused ones are kept for later, on top)
-    const onTop = drawEdges(ctx, model, states);
+    // -- pass 2: relationships at rest (under the tiles); focused ones are kept for later
+    s.curves = buildCurves(ctx, model, states, scaling);
+    for (const c of s.curves) if (!c.touched) strokeCurve(ctx, c, false);
     // -- pass 3: box bodies + borders, then symbol chips
     for (const st of boxes) if (st.da > 0.01) drawBox(ctx, st);
     for (const st of leaves) drawChip(ctx, st);
-    // -- pass 4: focused relationships, continuous and above tiles
-    for (const f of onTop) f();
-    // -- pass 5: labels (titles, names, pills) above everything
+    // -- pass 4: resting lines plug visibly into their tiles
+    for (const c of s.curves) if (!c.touched) drawSockets(ctx, c);
+    // -- pass 5: labels
     drawLabels();
-    // -- pass 6: selection and hover rings
-    if (s.selected) drawRing(ctx, states, s.selected, true);
-    if (s.hover && s.hover !== s.selected) drawRing(ctx, states, s.hover, false);
+    // -- pass 6: the selection veils the rest; its world is redrawn on top
+    if (s.emphSel > 0.01 && selSt) drawVeil(ctx, selSt, states);
+    // -- pass 7: focused relationships, continuous and on top
+    for (const c of s.curves) if (c.touched) strokeCurve(ctx, c, true);
+    if (drawGlint(ctx, now)) pending = true;
+    // -- pass 8: rings and the landing pulse
+    if (s.selected) drawRing(ctx, s.selected, true, now);
+    if (s.hover && s.hover !== s.selected) drawRing(ctx, s.hover, false, now);
+    if (drawPulse(ctx, now)) pending = true;
 
     updateCrumbs(model, states);
     if (moved) refreshHover();
+    const hint = s.emphSel > 0.5 && s.curves.some((c) => c.sel);
+    if (hint !== s.focusHint) {
+      s.focusHint = hint;
+      setFocusHint(hint);
+    }
     if (!s.revealed) {
       s.revealed = true;
       canvas.style.opacity = "1";
@@ -405,7 +509,8 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
   }
 
   function drawGrid(ctx: CanvasRenderingContext2D, v: View) {
-    // dots every 2^n world units, chosen so they sit 22–44 px apart; the finer level fades in smoothly
+    // dots every 2^n world units, chosen so they sit 22–44 px apart; the finer level fades in smoothly.
+    // Snapped to whole pixels so the grid does not shimmer while panning.
     const base = Math.pow(2, Math.floor(Math.log2(22 / v.k)));
     for (const [step, alpha] of [
       [base * 2, 0.12],
@@ -416,13 +521,12 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       ctx.fillStyle = `rgba(150,165,190,${alpha})`;
       const x0 = ((v.x % px) + px) % px;
       const y0 = ((v.y % px) + px) % px;
-      for (let x = x0; x < S.current.w; x += px) for (let y = y0; y < S.current.h; y += px) ctx.fillRect(x - 0.75, y - 0.75, 1.5, 1.5);
+      for (let x = x0; x < S.current.w; x += px) for (let y = y0; y < S.current.h; y += px) ctx.fillRect(Math.round(x) - 0.75, Math.round(y) - 0.75, 1.5, 1.5);
     }
   }
 
-  function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
     const rr = Math.max(0, Math.min(r, w / 2, h / 2));
-    ctx.beginPath();
     if (typeof ctx.roundRect === "function") {
       ctx.roundRect(x, y, w, h, rr);
       return;
@@ -436,23 +540,62 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     ctx.closePath();
   }
 
-  function frameFill(n: MapNode): string {
-    if (n.neutral) return tint(NEUTRAL_HUE, 0.06);
-    return tint(n.hue, Math.min(0.05 + n.depth * 0.022, 0.13));
+  function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+    ctx.beginPath();
+    roundRectPath(ctx, x, y, w, h, r);
   }
 
-  /** The open surface. Drawn fully (not faded by openness): the tile body then fades away over it, so a
-   *  box opening is one card changing, never a see-through double image. */
-  function drawFrameFill(ctx: CanvasRenderingContext2D, st: NodeState) {
-    ctx.globalAlpha = st.da;
-    roundRect(ctx, st.sx, st.sy, st.sw, st.sh, boxRadius(st.sw, st.sh));
-    ctx.fillStyle = frameFill(st.n);
-    ctx.fill();
-  }
-
-  /** Tile body (fading as the box opens), one border, and the box's labels. */
-  function drawBox(ctx: CanvasRenderingContext2D, st: NodeState) {
+  /** A box bigger than the screen is the room you are in: its edges and strip fade instead of stacking up
+   *  as rails along the screen. */
+  function roomFade(st: NodeState) {
     const s = S.current;
+    return 1 - smooth(1.1, 1.8, Math.max(st.sw / s.w, st.sh / s.h));
+  }
+
+  /** Height (px) of an open box's header strip: its title band plus the top of its padding. */
+  function stripPx(n: MapNode) {
+    return ((n.rect.header ?? 14) + (n.rect.pad ?? 10) * 0.75) * S.current.view.k;
+  }
+
+  /** The open surface, drawn fully (the tile body then fades away over it: one card, never a double image),
+   *  with a faint header strip under the title once the box is clearly open. */
+  function drawFrameFill(ctx: CanvasRenderingContext2D, st: NodeState) {
+    const { n, sx, sy, sw, sh } = st;
+    const radius = boxRadius(sw, sh);
+    ctx.globalAlpha = st.da;
+    roundRect(ctx, sx, sy, sw, sh, radius);
+    ctx.fillStyle = n.pal.frame;
+    ctx.fill();
+    const strip = stripPx(n);
+    const sa = st.da * smooth(0.3, 0.7, st.t) * roomFade(st);
+    if (strip >= 12 && sa > 0.01) {
+      ctx.save();
+      roundRect(ctx, sx, sy, sw, sh, radius);
+      ctx.clip();
+      ctx.globalAlpha = sa;
+      ctx.fillStyle = n.pal.band;
+      ctx.fillRect(sx, sy, sw, strip);
+      ctx.fillStyle = n.pal.bandLine;
+      ctx.fillRect(sx, sy + strip - 1, sw, 1);
+      ctx.restore();
+    }
+  }
+
+  function borderColor(n: MapNode, open: boolean): string {
+    if (n.kind !== "class") return open ? n.pal.frameBorder : n.pal.tileBorder;
+    // classes: border leans toward the class colour, so a class reads differently from a file
+    const key = `${n.id}|${open ? 1 : 0}`;
+    let c = S.current.classBorder.get(key);
+    if (!c) {
+      c = mixOklab(open ? n.pal.frameBorder : n.pal.tileBorder, KIND_STYLE.class.color, 0.4);
+      S.current.classBorder.set(key, c);
+    }
+    return c;
+  }
+
+  /** Tile body (fading as the box opens), one border morphing from the tile's to the frame's, kind cues, and
+   *  the box's labels. */
+  function drawBox(ctx: CanvasRenderingContext2D, st: NodeState) {
     const { n, sx, sy, sw, sh } = st;
     if (sw < 2 || sh < 2) return;
     const radius = boxRadius(sw, sh);
@@ -461,14 +604,14 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     if (bodyA > 0.01) {
       ctx.globalAlpha = bodyA;
       if (sw > 36) {
-        // soft shadow lifts tiles off the background
+        // soft shadow lifts tiles off the surface
         ctx.shadowColor = "rgba(0,0,0,0.45)";
         ctx.shadowBlur = Math.min(22, sw * 0.08);
         ctx.shadowOffsetY = Math.min(6, sw * 0.02);
       }
       const g = ctx.createLinearGradient(0, sy, 0, sy + sh);
-      g.addColorStop(0, n.neutral ? NEUTRAL_TOP : tint(n.hue, 0.34));
-      g.addColorStop(1, n.neutral ? NEUTRAL_BOTTOM : tint(n.hue, 0.22));
+      g.addColorStop(0, n.pal.tileTop);
+      g.addColorStop(1, n.pal.tileBottom);
       roundRect(ctx, sx, sy, sw, sh, radius);
       ctx.fillStyle = g;
       ctx.fill();
@@ -485,28 +628,42 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
         ctx.stroke();
       }
     }
-    // one border, morphing from the tile's to the frame's; a box bigger than the screen is the room you are
-    // in, and its edges fade so they do not stack up as rails along the screen
-    const room = 1 - smooth(1.1, 1.8, Math.max(sw / s.w, sh / s.h));
+    const room = roomFade(st);
     if (room > 0.01) {
-      ctx.globalAlpha = st.da * room;
-      roundRect(ctx, sx, sy, sw, sh, radius);
       ctx.lineWidth = 1;
-      if (n.neutral) {
-        ctx.setLineDash([4, 3]);
-        ctx.strokeStyle = withAlpha(NEUTRAL_BORDER, 0.9 - 0.45 * e);
-      } else {
-        ctx.strokeStyle = withAlpha(n.hue, 0.7 - 0.38 * e);
+      if (n.neutral) ctx.setLineDash([4, 3]);
+      if (e < 0.99) {
+        ctx.globalAlpha = st.da * room * (1 - e) * 0.9;
+        roundRect(ctx, sx, sy, sw, sh, radius);
+        ctx.strokeStyle = borderColor(n, false);
+        ctx.stroke();
       }
-      ctx.stroke();
+      if (e > 0.01) {
+        ctx.globalAlpha = st.da * room * e * 0.75;
+        roundRect(ctx, sx, sy, sw, sh, radius);
+        ctx.strokeStyle = borderColor(n, true);
+        ctx.stroke();
+      }
       ctx.setLineDash([]);
+      // a file shows a small folded corner, so files read differently from folders before you zoom in
+      if (n.kind === "file" && sw > 28 && sh > 20) {
+        const f = Math.min(9, sw * 0.08);
+        ctx.globalAlpha = st.da * room * (0.55 + 0.25 * (1 - e));
+        ctx.beginPath();
+        ctx.moveTo(sx + sw - radius - f, sy);
+        ctx.lineTo(sx + sw - radius, sy);
+        ctx.lineTo(sx + sw - radius, sy + f);
+        ctx.closePath();
+        ctx.fillStyle = borderColor(n, e > 0.5);
+        ctx.fill();
+      }
     }
     if (st.t < 0.3) queueTileName(ctx, st);
     if (st.t > 0.05) queueFrameTitle(ctx, st);
   }
 
-  /** The closed tile's name (and summary), centred on the part of the tile you can see. Size follows the
-   *  tile, not the name, so equal tiles carry equal names; long names shrink a little, then shorten. */
+  /** The closed tile's name (and summary), centred on the part of the tile you can see. Long names shrink a
+   *  little, then shorten. */
   function queueTileName(ctx: CanvasRenderingContext2D, st: NodeState) {
     const s = S.current;
     const { n, sx, sy, sw, sh } = st;
@@ -515,19 +672,19 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     const vx1 = Math.max(sx, 8), vy1 = Math.max(sy, 8);
     const vx2 = Math.min(sx + sw, s.w - 8), vy2 = Math.min(sy + sh, s.h - 8);
     const vw = vx2 - vx1, vh = vy2 - vy1;
+    // size follows the tile's own size (never the name's length), so equal tiles carry equal names
     let size = Math.min(22, sw / 7, sh / 3.2);
     // mid-sized tiles keep their name inside at a small but legible size; only tiny tiles use a pill
     if (size < 11 && sw >= 48 && sh >= 22) size = 10.5;
     if (size >= 10.5 && vw >= 44 && vh >= size * 1.6) {
-      const want = measure(ctx, n.label, `600 ${size}px ${SANS}`);
+      const want = measure(ctx, n.label, sans(600, size));
       if (want > vw - 16) size = Math.max(Math.min(size, 11), size * 0.8, Math.min(size, (size * (vw - 16)) / want));
-      const font = `600 ${size}px ${SANS}`;
+      const font = sans(600, size);
       const name = fitSmart(ctx, n.label, font, vw - 16);
       if (!name) return;
       if (name !== n.label) st.nameHidden = true;
-      const subSize = Math.max(11, size * 0.62);
-      const subFont = `${subSize}px ${SANS}`;
-      const sub = sh > size * 3.4 && vh > size * 3 ? fitParts(ctx, n.summary, subFont, vw - 16) : "";
+      const subFont = sans(400, Math.max(11, size * 0.68));
+      const sub = size >= 14 && sh > size * 3.4 && vh > size * 3 ? fitParts(ctx, n.summary, subFont, vw - 16) : "";
       const cx = (vx1 + vx2) / 2;
       const cy = (vy1 + vy2) / 2 - (sub ? size * 0.55 : 0);
       const w = measure(ctx, name, font);
@@ -542,66 +699,70 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
           ctx.globalAlpha = alpha;
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.font = font;
-          ctx.fillStyle = TEXT;
+          ctx.font = fontOf(font);
+          ctx.fillStyle = n.pal.name;
           ctx.fillText(name, cx, cy);
           if (sub) {
-            ctx.font = subFont;
-            ctx.fillStyle = withAlpha("#dfe5ee", 0.78);
+            ctx.font = fontOf(subFont);
+            ctx.fillStyle = n.pal.sub;
             ctx.fillText(sub, cx, cy + size * 1.15);
           }
         },
       });
     } else if (sw > 6 && alpha > 0.3) {
       st.nameHidden = true; // the pill may lose a collision; the tooltip always has the name
-      const font = `600 11px ${SANS}`;
-      const text = fitSmart(ctx, n.label, font, 160);
-      if (!text) return;
-      const tw = measure(ctx, text, font);
-      const cx = sx + sw / 2;
-      const py = sy + sh + 3;
-      S.current.labels.push({
-        x: cx - tw / 2 - 5,
-        y: py,
-        w: tw + 10,
-        h: 16,
-        pill: true,
-        area: sw * sh,
-        draw: () => {
-          ctx.globalAlpha = alpha * 0.95;
-          roundRect(ctx, cx - tw / 2 - 5, py, tw + 10, 16, 6);
-          ctx.fillStyle = "rgba(15,18,24,0.88)";
-          ctx.fill();
-          ctx.font = font;
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          ctx.fillStyle = TEXT;
-          ctx.fillText(text, cx, py + 8.5);
-        },
-      });
+      queuePill(ctx, n.label, sx + sw / 2, sy + sh + 3, sw * sh, alpha);
     }
   }
 
-  /** An open box's title band: name on the left, contents on the right, kept inside the visible part. */
+  function queuePill(ctx: CanvasRenderingContext2D, label: string, cx: number, top: number, area: number, alpha: number) {
+    const font = sans(600, 11);
+    const text = fitSmart(ctx, label, font, 160);
+    if (!text) return;
+    const tw = measure(ctx, text, font);
+    S.current.labels.push({
+      x: cx - tw / 2 - 5,
+      y: top,
+      w: tw + 10,
+      h: 16,
+      pill: true,
+      area,
+      draw: () => {
+        ctx.globalAlpha = alpha * 0.95;
+        roundRect(ctx, cx - tw / 2 - 5, top, tw + 10, 16, 6);
+        ctx.fillStyle = "rgba(15,18,24,0.88)";
+        ctx.fill();
+        ctx.font = fontOf(font);
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = MAP_INK;
+        ctx.fillText(text, cx, top + 8.5);
+      },
+    });
+  }
+
+  /** An open box's title in its header strip: name left, contents right, kept inside the visible part. One
+   *  size per sibling group. */
   function queueFrameTitle(ctx: CanvasRenderingContext2D, st: NodeState) {
     const s = S.current;
     const { n, sx, sy, sw } = st;
     const alpha = st.da * smooth(0.05, 0.3, st.t);
     if (alpha < 0.02) return;
-    const band = (n.rect.header ?? 20) * s.view.k;
-    if (band < 12) return;
-    const size = clamp(band * 0.4, 12, 20);
-    const ty = sy + Math.max(band, size * 1.6) / 2;
+    const strip = stripPx(n);
+    if (strip < 12) return;
+    const size = clamp(n.bandWorld * s.view.k * 0.5, 13, 16);
+    const ty = sy + strip / 2;
     if (ty < -size || ty > s.h + size) return;
     const visL = Math.max(sx, 0) + 12;
     const visR = Math.min(sx + sw, s.w) - 12;
     if (visR - visL < 40) return;
-    const font = `600 ${size}px ${SANS}`;
-    const title = fitSmart(ctx, n.label, font, 0.6 * (visR - visL));
+    const font = sans(600, size);
+    const label = n.kind === "class" ? `◆ ${n.label}` : n.label;
+    const title = fitSmart(ctx, label, font, 0.6 * (visR - visL));
     if (!title) return;
     const titleW = measure(ctx, title, font);
     const tx = Math.max(sx + 12, Math.min(visL, visR - titleW));
-    const subFont = `${Math.max(11, size - 3)}px ${SANS}`;
+    const subFont = sans(400, 12);
     const sub = fitParts(ctx, n.summary, subFont, visR - visL - titleW - 24);
     S.current.labels.push({
       x: tx,
@@ -614,12 +775,14 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
         ctx.globalAlpha = alpha;
         ctx.textBaseline = "middle";
         ctx.textAlign = "left";
-        ctx.font = font;
-        ctx.fillStyle = n.neutral ? "#d8d3c4" : n.hue;
+        ctx.font = fontOf(font);
+        ctx.fillStyle = n.pal.title;
         ctx.fillText(title, tx, ty);
+        // the title band is clickable: underline it under the pointer
+        if (S.current.hover === n.id && S.current.hoverTitle) ctx.fillRect(tx, ty + size * 0.62, titleW, 1);
         if (sub) {
-          ctx.font = subFont;
-          ctx.fillStyle = MUTED;
+          ctx.font = fontOf(subFont);
+          ctx.fillStyle = MAP_MUTED;
           ctx.textAlign = "right";
           ctx.fillText(sub, visR, ty);
         }
@@ -642,77 +805,204 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     s.labels = [];
   }
 
-  /** Chip geometry for a symbol (screen space). Below ~19 px tall it is drawn as a dot at the chip's dot. */
-  function chipGeom(st: NodeState) {
+  // ---- symbols ------------------------------------------------------------------------------------------
+  /** Chip geometry (screen space), left-aligned in its layout slot. Chips stop growing at MAX_CHIP; deeper
+   *  zoom fades a card in over the whole slot. Far away a chip is a dot at the chip's own mark. */
+  function chipGeom(ctx: CanvasRenderingContext2D, st: NodeState) {
     const v = S.current.view;
-    const ch = CHIP_H * v.k;
-    const cw = Math.max(18, st.n.rect.w - 8) * v.k;
-    const cx = st.n.rect.x * v.k + v.x;
-    const cy = st.n.rect.y * v.k + v.y;
-    return { ch, cw, cx, cy, x: cx - cw / 2, y: cy - ch / 2, ca: smooth(19, 23, ch) };
+    const r = st.n.rect;
+    const slotX = (r.x - r.w / 2) * v.k + v.x;
+    const slotY = (r.y - r.h / 2) * v.k + v.y;
+    const slotW = r.w * v.k;
+    const slotH = r.h * v.k;
+    const ch = Math.min(CHIP_H * v.k, MAX_CHIP);
+    const size = clamp(ch * 0.5, 10, 13);
+    const textW = measure(ctx, st.n.label, mono(400, size));
+    const extra = st.n.isComponent ? size * 2.2 : 0;
+    const cw = Math.max(ch, Math.min(Math.max(18 * v.k, slotW - 8 * v.k), textW + ch * 1.25 + 14 + extra));
+    const x = slotX + Math.min(4 * v.k, 4);
+    const cy = slotY + slotH / 2;
+    const card = smooth(2.2 * ch, 2.8 * ch, slotH);
+    return { ch, cw, x, y: cy - ch / 2, cy, size, ca: smooth(19, 23, ch), card, slotX, slotY, slotW, slotH };
+  }
+
+  /** A small shape per kind: ● function, ◆ class, ▶ endpoint, ▭ table, tag for a package. Private helpers get
+   *  a hollow mark. */
+  function drawGlyph(ctx: CanvasRenderingContext2D, n: MapNode, x: number, y: number, r: number, color: string) {
+    ctx.beginPath();
+    const big = r >= 3;
+    switch (big ? n.kind : "function") {
+      case "class":
+        ctx.moveTo(x, y - r * 1.2);
+        ctx.lineTo(x + r * 1.2, y);
+        ctx.lineTo(x, y + r * 1.2);
+        ctx.lineTo(x - r * 1.2, y);
+        ctx.closePath();
+        break;
+      case "endpoint":
+        ctx.moveTo(x - r * 0.8, y - r);
+        ctx.lineTo(x + r, y);
+        ctx.lineTo(x - r * 0.8, y + r);
+        ctx.closePath();
+        break;
+      case "table":
+        ctx.rect(x - r, y - r * 0.8, r * 2, r * 1.6);
+        break;
+      case "dependency":
+        ctx.moveTo(x - r, y);
+        ctx.lineTo(x - r * 0.3, y - r * 0.9);
+        ctx.lineTo(x + r, y - r * 0.9);
+        ctx.lineTo(x + r, y + r * 0.9);
+        ctx.lineTo(x - r * 0.3, y + r * 0.9);
+        ctx.closePath();
+        break;
+      default:
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+    }
+    if (n.priv && big) {
+      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = color;
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
   }
 
   function drawChip(ctx: CanvasRenderingContext2D, st: NodeState) {
     const s = S.current;
     const { n } = st;
-    const { ch, cw, cy, x, y, ca } = chipGeom(st);
-    if (x > s.w || y > s.h || x + cw < 0 || y + ch < 0) return;
-    const color = KIND_STYLE[n.kind as NodeKind]?.color ?? n.hue;
+    const g = chipGeom(ctx, st);
+    if (g.slotX > s.w || g.slotY > s.h || g.slotX + g.slotW < 0 || g.slotY + g.slotH < 0) return;
+    const pal = n.chip!;
     const base = st.da * (n.quiet ? 0.5 : 1);
-    if (ca < 1) {
-      // far away: a small coloured dot exactly where the chip's own dot will be, growing into the chip
-      ctx.globalAlpha = base * (1 - ca) * 0.85;
+    const dotR = clamp(g.ch * 0.15, 1.5, 3.5);
+    if (g.ca < 1) {
+      // far away: a small coloured dot exactly where the chip's own mark will be, growing into the chip
+      ctx.globalAlpha = base * (1 - g.ca) * 0.85;
       ctx.beginPath();
-      ctx.arc(x + ch * 0.5, cy, Math.max(1.5, ch * 0.17), 0, Math.PI * 2);
-      ctx.fillStyle = color;
+      ctx.arc(g.x + g.ch * 0.5, g.cy, Math.max(1.5, dotR), 0, Math.PI * 2);
+      ctx.fillStyle = pal.dot;
       ctx.fill();
     }
-    if (ca <= 0) return;
-    // one alpha for capsule, dot and name: a capsule is never blank
-    ctx.globalAlpha = base * ca;
-    roundRect(ctx, x, y, cw, ch, ch / 2);
-    ctx.fillStyle = tint(color, 0.2);
-    ctx.fill();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = withAlpha(color, 0.55);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(x + ch * 0.5, cy, ch * 0.17, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
-    const size = clamp(ch * 0.5, 10, 13);
-    const font = `${size}px ${MONO}`;
-    const label = fitSmart(ctx, n.label, font, cw - ch * 0.95);
-    if (label !== n.label) st.nameHidden = true;
-    if (!label) return;
-    ctx.font = font;
-    ctx.fillStyle = TEXT;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "middle";
-    ctx.fillText(label, x + ch * 0.85, cy + 0.5);
+    if (g.ca <= 0) return;
+    const chipA = base * g.ca * (1 - g.card);
+    if (chipA > 0.01) {
+      // one alpha for capsule, mark and name: a capsule is never blank
+      ctx.globalAlpha = chipA;
+      roundRect(ctx, g.x, g.y, g.cw, g.ch, g.ch / 2);
+      ctx.fillStyle = pal.fill;
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = withAlpha(pal.stroke, n.priv ? 0.3 : 0.55);
+      ctx.stroke();
+      drawGlyph(ctx, n, g.x + g.ch * 0.5, g.cy, dotR, pal.dot);
+      const font = mono(400, g.size);
+      const room = g.cw - g.ch * 0.95 - (n.isComponent ? g.size * 2.2 : 0) - 6;
+      const label = fitSmart(ctx, n.label, font, room);
+      if (label !== n.label) st.nameHidden = true;
+      if (label) {
+        ctx.font = fontOf(font);
+        ctx.fillStyle = n.priv ? MAP_MUTED : MAP_INK;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, g.x + g.ch * 0.85, g.cy + 0.5);
+        if (n.isComponent) {
+          // a React component: a small </> mark
+          ctx.font = fontOf(mono(400, g.size * 0.8));
+          ctx.fillStyle = withAlpha(pal.dot, 0.8);
+          ctx.textAlign = "right";
+          ctx.fillText("</>", g.x + g.cw - g.ch * 0.4, g.cy + 0.5);
+        }
+      }
+    }
+    if (g.card > 0.01) drawCard(ctx, st, g, base * g.ca * g.card);
   }
 
-  /** Where a line attaches on a node: the tile, the chip, or (far away) the chip's dot. */
+  /** Deep zoom: the symbol as a small card with its signature, line range and flags. */
+  function drawCard(ctx: CanvasRenderingContext2D, st: NodeState, g: ReturnType<typeof chipGeom>, alpha: number) {
+    const { n } = st;
+    const pal = n.chip!;
+    const v = S.current.view;
+    const mx = Math.min(4 * v.k, 6);
+    const my = Math.min(3 * v.k, 5);
+    // a card is as big as what it says (not the whole slot), left-aligned and centred vertically
+    const want = Math.max(
+      measure(ctx, n.label, mono(600, 14)) + 52,
+      n.detail ? measure(ctx, n.detail, mono(400, 11)) + 28 : 0,
+      n.detail2 ? measure(ctx, n.detail2, mono(400, 11)) + 28 : 0,
+      200,
+    );
+    const w = Math.max(40, Math.min(g.slotW - 2 * mx, want));
+    const h = Math.max(24, Math.min(g.slotH - 2 * my, n.detail2 ? 80 : 62));
+    const x = g.slotX + mx;
+    const y = g.slotY + (g.slotH - h) / 2;
+    ctx.globalAlpha = alpha;
+    roundRect(ctx, x, y, w, h, Math.min(12, h * 0.25));
+    ctx.fillStyle = pal.fill;
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = withAlpha(pal.stroke, n.priv ? 0.35 : 0.6);
+    ctx.stroke();
+    const pad = 12;
+    const name = mono(600, 14);
+    drawGlyph(ctx, n, x + pad + 4, y + pad + 8, 4, pal.dot);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.font = fontOf(name);
+    ctx.fillStyle = n.priv ? MAP_MUTED : MAP_INK;
+    ctx.fillText(fitSmart(ctx, n.label, name, w - pad * 2 - 18), x + pad + 16, y + pad + 8.5);
+    const small = mono(400, 11);
+    ctx.font = fontOf(small);
+    ctx.fillStyle = MAP_MUTED;
+    let ly = y + pad + 28;
+    for (const line of [n.detail, h >= 60 ? n.detail2 : ""]) {
+      if (!line || ly > y + h - 8) continue;
+      ctx.fillText(fitSmart(ctx, line, small, w - pad * 2), x + pad, ly);
+      ly += 16;
+    }
+  }
+
+  /** Where a line attaches on a node: a tile (lines then enter it a little), a chip's border, a card, or the
+   *  chip's dot from far away. */
   function anchor(st: NodeState): Anchor {
     if (st.n.box) return { cx: st.sx + st.sw / 2, cy: st.sy + st.sh / 2, hw: st.sw / 2, hh: st.sh / 2 };
-    const g = chipGeom(st);
+    const ctx = canvasRef.current!.getContext("2d")!;
+    const g = chipGeom(ctx, st);
+    if (g.card > 0.5) {
+      const w = Math.min(g.slotW - 8, Math.max(200, g.cw + 40));
+      const h = Math.min(g.slotH - 6, st.n.detail2 ? 80 : 62);
+      return { cx: g.slotX + 4 + w / 2, cy: g.slotY + g.slotH / 2, hw: w / 2, hh: h / 2 };
+    }
     if (g.ca < 0.5) {
-      const r = Math.max(1.5, g.ch * 0.17) + 3;
+      const r = clamp(g.ch * 0.15, 1.5, 3.5) + 3;
       return { cx: g.x + g.ch * 0.5, cy: g.cy, hw: r, hh: r };
     }
-    return { cx: g.cx, cy: g.cy, hw: g.cw / 2, hh: g.ch / 2 };
+    return { cx: g.x + g.cw / 2, cy: g.cy, hw: g.cw / 2, hh: g.ch / 2 };
   }
 
   function clip(a: Anchor, dx: number, dy: number, pad: number) {
     // point where the ray from the centre along (dx, dy) leaves the (padded) rectangle
-    const sx = dx === 0 ? Infinity : (a.hw + pad) / Math.abs(dx);
-    const sy = dy === 0 ? Infinity : (a.hh + pad) / Math.abs(dy);
+    const sx = dx === 0 ? Infinity : Math.max(0.5, a.hw + pad) / Math.abs(dx);
+    const sy = dy === 0 ? Infinity : Math.max(0.5, a.hh + pad) / Math.abs(dy);
     const s = Math.min(sx, sy);
     return { x: a.cx + dx * s, y: a.cy + dy * s };
   }
 
-  /** Draws resting relationships; returns the focused ones as draw calls for the pass above the tiles. */
-  function drawEdges(ctx: CanvasRenderingContext2D, model: MapModel, states: Map<string, NodeState>): (() => void)[] {
+  // ---- relationships ----------------------------------------------------------------------------------------
+  function mixColor(a: string, b: string, t: number) {
+    const cache = S.current.mixCache;
+    const key = `${a}${b}${t}`;
+    let c = cache.get(key);
+    if (!c) {
+      c = mixOklab(a, b, t);
+      if (cache.size > 200) cache.clear();
+      cache.set(key, c);
+    }
+    return c;
+  }
+
+  function buildCurves(ctx: CanvasRenderingContext2D, model: MapModel, states: Map<string, NodeState>, scaling: boolean): Curve[] {
     const s = S.current;
     const selSet = subtree(s.selected);
     const hovSet = s.hover !== s.selected ? subtree(s.hover) : null;
@@ -740,28 +1030,40 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       if (!r) cache.set(id, (r = standIns(id)));
       return r;
     };
-    type Pair = { a: string; b: string; w: number; n: number; ext: number; sel: boolean; hov: boolean; kinds: Map<string, number> };
+    type Pair = { a: string; b: string; w: number; n: number; ext: number; out: boolean; inc: boolean; sel: boolean; hov: boolean; kinds: Map<string, number> };
     const merged = new Map<string, Pair>();
     for (const e of model.edges) {
-      const sel = !!selSet && selSet.has(e.source) !== selSet.has(e.target);
-      const hov = !!hovSet && hovSet.has(e.source) !== hovSet.has(e.target);
+      const sOut = !!selSet && selSet.has(e.source) && !selSet.has(e.target);
+      const sIn = !!selSet && !selSet.has(e.source) && selSet.has(e.target);
+      const hOut = !!hovSet && hovSet.has(e.source) && !hovSet.has(e.target);
+      const hIn = !!hovSet && !hovSet.has(e.source) && hovSet.has(e.target);
       for (const [a, wa] of ends(e.source)) {
         for (const [b, wb] of ends(e.target)) {
           if (a === b) continue;
           const key = `${a}>${b}`;
           let m = merged.get(key);
-          if (!m) merged.set(key, (m = { a, b, w: 0, n: 0, ext: 0, sel: false, hov: false, kinds: new Map() }));
+          if (!m) merged.set(key, (m = { a, b, w: 0, n: 0, ext: 0, out: false, inc: false, sel: false, hov: false, kinds: new Map() }));
           m.w += wa * wb;
           m.n += 1;
           if (e.external) m.ext += 1;
-          m.sel ||= sel;
-          m.hov ||= hov;
+          m.out ||= sOut || hOut;
+          m.inc ||= sIn || hIn;
+          m.sel ||= sOut || sIn;
+          m.hov ||= hOut || hIn;
           m.kinds.set(e.kind, (m.kinds.get(e.kind) ?? 0) + 1);
         }
       }
     }
-    const onTop: (() => void)[] = [];
-    ctx.lineCap = "round";
+    // at rest only the strongest folder/file links show; the others taper off and appear on focus
+    const boxPairs = [...merged.values()]
+      .filter((m) => !m.sel && !m.hov && states.get(m.a)!.n.box && states.get(m.b)!.n.box && m.ext < m.n)
+      .sort((x, y) => y.w - x.w);
+    const budget = new Map<string, number>();
+    boxPairs.forEach((m, i) => budget.set(`${m.a}>${m.b}`, i < LINE_BUDGET ? 1 : i < LINE_BUDGET + 8 ? 1 - (i - LINE_BUDGET + 1) / 9 : 0));
+
+    const obstacles = scaling ? null : buildObstacles(states);
+    const curves: Curve[] = [];
+    const outside = (p: Anchor) => Math.max(0, -p.cx, p.cx - s.w, -p.cy, p.cy - s.h);
     for (const m of merged.values()) {
       const sa = states.get(m.a)!;
       const sb = states.get(m.b)!;
@@ -772,25 +1074,19 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       const B = anchor(sb);
       const inA = A.cx > 0 && A.cx < s.w && A.cy > 0 && A.cy < s.h;
       const inB = B.cx > 0 && B.cx < s.w && B.cy > 0 && B.cy < s.h;
-      // lines to somewhere off-screen only matter for the item you are pointing at
-      if (!(inA && inB) && !touched) continue;
       if (!inA && !inB) continue;
-      const dx = B.cx - A.cx;
-      const dy = B.cy - A.cy;
-      const len = Math.hypot(dx, dy);
-      if (len < 4) continue;
-      const p = clip(A, dx / len, dy / len, sa.n.box ? 0 : 2);
-      const q = clip(B, -dx / len, -dy / len, sb.n.box ? 0 : 2);
-      const seg = Math.hypot(q.x - p.x, q.y - p.y);
-      if (seg < 2) continue;
       const kind = [...m.kinds.entries()].sort((x, y) => y[1] - x[1])[0][0] as EdgeKind;
       const bothBoxes = sa.n.box && sb.n.box;
       const rare = RARE_KINDS.has(kind) && !bothBoxes;
       const external = m.ext === m.n;
-      const color = rare ? (EDGE_STYLE[kind]?.color ?? INK) : touched ? INK_FOCUS : INK;
       const local = sa.n.parent === sb.n.parent;
-      let alpha = strength * (touched ? (m.sel ? 0.95 : 0.75) : local ? 0.55 : bothBoxes ? 0.22 : 0.1);
-      if (focusAny && !touched && !(openSet && openSet.has(m.a) && openSet.has(m.b))) alpha *= 0.45;
+      let alpha = strength * (touched ? (m.sel ? 0.4 + 0.55 * s.emphSel : 0.75) : local ? 0.55 : bothBoxes ? 0.22 : 0.1);
+      if (!touched) {
+        if (focusAny && !(openSet && openSet.has(m.a) && openSet.has(m.b))) alpha *= 0.45;
+        if (bothBoxes && !external) alpha *= budget.get(`${m.a}>${m.b}`) ?? 1;
+        // fade at the screen edge instead of blinking out
+        alpha *= (1 - smooth(0, 120, outside(A))) * (1 - smooth(0, 120, outside(B)));
+      } else if (m.hov && !m.sel) alpha *= 0.5 + 0.5 * s.emphHov;
       let width = (1 + 3 * Math.min(1, Math.log2(m.w + 1) / Math.log2(41))) * (touched ? 1.6 : 1);
       let dash = rare && (alpha >= 0.15 || touched) ? (EDGE_STYLE[kind]?.dash ?? []) : [];
       let arrow = true;
@@ -802,87 +1098,297 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
         arrow = false;
       }
       if (alpha < 0.01) continue;
-      // gentle curve: the perpendicular flips with direction, so A→B and B→A bow apart into a lens
-      const ux = (q.x - p.x) / seg;
-      const uy = (q.y - p.y) / seg;
-      const bend = seg < 30 ? 0 : Math.min(40, seg * 0.15);
-      const mx = (p.x + q.x) / 2 - uy * bend;
-      const my = (p.y + q.y) / 2 + ux * bend;
-      const paint = () => {
-        ctx.globalAlpha = 1;
-        if (inA && inB) ctx.strokeStyle = withAlpha(color, alpha);
-        else {
-          // one end is off-screen: fade the line out towards it
-          const g = ctx.createLinearGradient(p.x, p.y, q.x, q.y);
-          g.addColorStop(inA ? 0 : 1, withAlpha(color, alpha));
-          g.addColorStop(inA ? 1 : 0, withAlpha(color, 0));
-          ctx.strokeStyle = g;
-        }
-        ctx.lineWidth = width;
-        ctx.lineCap = "round";
-        ctx.setLineDash(dash.map((d) => d * Math.max(1, width * 0.8)));
-        if (touched) {
-          ctx.shadowColor = withAlpha(color, 0.55);
-          ctx.shadowBlur = 6;
-        }
-        ctx.beginPath();
-        ctx.moveTo(p.x, p.y);
-        ctx.quadraticCurveTo(mx, my, q.x, q.y);
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-        ctx.shadowColor = "transparent";
-        ctx.setLineDash([]);
-        // arrowhead at the target, only where there is room for it
-        if (arrow && inB && seg > 32 && alpha > 0.08) {
-          const ang = Math.atan2(q.y - my, q.x - mx);
-          const sz = Math.min(4 + width * 1.5, seg * 0.25);
-          ctx.beginPath();
-          ctx.moveTo(q.x, q.y);
-          ctx.lineTo(q.x - sz * Math.cos(ang - 0.45), q.y - sz * Math.sin(ang - 0.45));
-          ctx.lineTo(q.x - sz * Math.cos(ang + 0.45), q.y - sz * Math.sin(ang + 0.45));
-          ctx.closePath();
-          ctx.fillStyle = withAlpha(color, Math.min(1, alpha * 1.2));
-          ctx.fill();
-        }
-      };
-      if (touched) onTop.push(paint);
-      else paint();
+      // colour: one calm ink at rest; direction colours for the focused item (amber = it uses, periwinkle =
+      // it is used by), blended in as the emphasis eases so nothing snaps
+      let color = rare ? (EDGE_STYLE[kind]?.color ?? INK) : INK;
+      if (touched && !rare) {
+        const dir = m.out && m.inc ? FOCUS_BOTH : m.out ? FOCUS_OUT : FOCUS_IN;
+        const amt = m.sel ? s.emphSel : s.emphHov;
+        color = mixColor(INK_FOCUS, dir, Math.round(amt * 10) / 10);
+      }
+      // geometry: tiles are entered a little (the line plugs in), chips are met just outside their border
+      const dx = B.cx - A.cx;
+      const dy = B.cy - A.cy;
+      const len = Math.hypot(dx, dy);
+      if (len < 4) continue;
+      const inset = (st: NodeState) => (st.n.box ? -Math.min(28, 0.18 * Math.min(st.sw, st.sh)) : 2);
+      const p = clip(A, dx / len, dy / len, inset(sa));
+      const q = clip(B, -dx / len, -dy / len, inset(sb));
+      const seg = Math.hypot(q.x - p.x, q.y - p.y);
+      if (seg < 2) continue;
+      const key = `${m.a}>${m.b}`;
+      // gentle curve: the perpendicular flips with direction, so A→B and B→A bow apart into a lens. At rest a
+      // line is routed around unrelated tiles (other side, then a wider bow) or left out; the choice is made
+      // when the camera settles and kept while it moves, so lines never flip mid-zoom.
+      let choice = s.curveChoice.get(key) ?? { sign: 1, mul: 1, skip: false };
+      if (!touched && obstacles) {
+        choice = route(p, q, seg, obstacles, sa, sb);
+        if (s.curveChoice.size > 4000) s.curveChoice.clear();
+        s.curveChoice.set(key, choice);
+      }
+      if (!touched && choice.skip) continue;
+      const c = control(p, q, seg, touched ? 1 : choice.sign, touched ? 1 : choice.mul);
+      curves.push({ key, a: sa, b: sb, p, c, q, color, alpha, width, dash, arrow, touched, sel: m.sel, inA, inB });
     }
-    return onTop;
+    void ctx;
+    return curves;
   }
 
-  /** Selection: a blue ring (the app accent) with a soft glow; hover: a quiet light ring. An open box gets a
-   *  thin outline instead, so the room you are in does not glow. */
-  function drawRing(ctx: CanvasRenderingContext2D, states: Map<string, NodeState>, id: string, selectedRing: boolean) {
-    const model = S.current.model!;
-    const n = model.nodes.get(id);
-    if (!n) return;
-    // the node itself if visible, otherwise the tile that currently stands in for it
-    const target = [id, ...n.ancestors]
-      .map((x) => states.get(x))
-      .find((st) => st && st.vis > 0.3 && (st.t < 0.5 || !st.n.box || st.n.id === id));
+  function control(p: Pt, q: Pt, seg: number, sign: number, mul: number): Pt {
+    const ux = (q.x - p.x) / seg;
+    const uy = (q.y - p.y) / seg;
+    const bend = seg < 30 ? 0 : Math.min(40 * mul, seg * 0.15 * mul) * sign;
+    return { x: (p.x + q.x) / 2 - uy * bend, y: (p.y + q.y) / 2 + ux * bend };
+  }
+
+  /** Closed tiles and chips on screen, bucketed in a 64 px grid, for routing lines around them. */
+  function buildObstacles(states: Map<string, NodeState>): Obstacles {
+    const cell = 64;
+    const grid = new Map<string, Obstacle[]>();
+    const add = (r: Obstacle) => {
+      for (let gx = Math.floor(r.x / cell); gx <= Math.floor((r.x + r.w) / cell); gx++) {
+        for (let gy = Math.floor(r.y / cell); gy <= Math.floor((r.y + r.h) / cell); gy++) {
+          const k = `${gx},${gy}`;
+          if (!grid.has(k)) grid.set(k, []);
+          grid.get(k)!.push(r);
+        }
+      }
+    };
+    for (const st of states.values()) {
+      if (!st.onScreen || st.da < 0.5) continue;
+      if (st.n.box) {
+        if (st.t < 0.5) add({ x: st.sx, y: st.sy, w: st.sw, h: st.sh, id: st.n.id, anc: st.n.ancestors });
+      } else {
+        const a = anchor(st);
+        if (a.hw > 4) add({ x: a.cx - a.hw, y: a.cy - a.hh, w: a.hw * 2, h: a.hh * 2, id: st.n.id, anc: st.n.ancestors });
+      }
+    }
+    return { cell, grid };
+  }
+
+  function route(p: Pt, q: Pt, seg: number, ob: Obstacles, sa: NodeState, sb: NodeState) {
+    const own = new Set([sa.n.id, sb.n.id, ...sa.n.ancestors, ...sb.n.ancestors]);
+    const blocked = (c: Pt) => {
+      for (let i = 0; i < 8; i++) {
+        const t = 0.1 + (0.8 * i) / 7;
+        const x = (1 - t) * (1 - t) * p.x + 2 * (1 - t) * t * c.x + t * t * q.x;
+        const y = (1 - t) * (1 - t) * p.y + 2 * (1 - t) * t * c.y + t * t * q.y;
+        const bucket = ob.grid.get(`${Math.floor(x / ob.cell)},${Math.floor(y / ob.cell)}`);
+        if (!bucket) continue;
+        for (const r of bucket) {
+          if (own.has(r.id) || r.anc.includes(sa.n.id) || r.anc.includes(sb.n.id)) continue;
+          if (x > r.x && x < r.x + r.w && y > r.y && y < r.y + r.h) return true;
+        }
+      }
+      return false;
+    };
+    for (const [sign, mul] of [
+      [1, 1],
+      [-1, 1],
+      [1, 2],
+      [-1, 2],
+    ]) {
+      if (!blocked(control(p, q, seg, sign, mul))) return { sign, mul, skip: false };
+    }
+    return { sign: 1, mul: 1, skip: true };
+  }
+
+  function curvePath(ctx: CanvasRenderingContext2D, c: Curve) {
+    ctx.beginPath();
+    ctx.moveTo(c.p.x, c.p.y);
+    ctx.quadraticCurveTo(c.c.x, c.c.y, c.q.x, c.q.y);
+  }
+
+  function strokeCurve(ctx: CanvasRenderingContext2D, c: Curve, onTop: boolean) {
+    ctx.lineCap = "round";
+    const dash = c.dash.map((d) => d * Math.max(1, c.width * 0.8));
+    if (onTop) {
+      // a dark casing keeps a focused line readable where it crosses tiles and other lines
+      ctx.globalAlpha = 0.6 * Math.min(1, c.alpha * 1.5);
+      ctx.strokeStyle = MAP_BG;
+      ctx.lineWidth = c.width + 2;
+      ctx.setLineDash(dash);
+      curvePath(ctx, c);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    if (c.inA && c.inB) ctx.strokeStyle = withAlpha(c.color, c.alpha);
+    else {
+      // one end is off-screen: fade the line out towards it
+      const g = ctx.createLinearGradient(c.p.x, c.p.y, c.q.x, c.q.y);
+      g.addColorStop(c.inA ? 0 : 1, withAlpha(c.color, c.alpha));
+      g.addColorStop(c.inA ? 1 : 0, withAlpha(c.color, 0));
+      ctx.strokeStyle = g;
+    }
+    ctx.lineWidth = c.width;
+    ctx.setLineDash(dash);
+    if (onTop) {
+      ctx.shadowColor = withAlpha(c.color, 0.5);
+      ctx.shadowBlur = 6;
+    }
+    curvePath(ctx, c);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = "transparent";
+    ctx.setLineDash([]);
+    // arrowheads: on top for focused lines; for resting lines into a chip here, into a tile in the socket pass
+    if (c.arrow && c.inB && (onTop || !c.b.n.box)) drawArrow(ctx, c, onTop ? 8 : undefined);
+  }
+
+  function drawArrow(ctx: CanvasRenderingContext2D, c: Curve, size?: number) {
+    const seg = Math.hypot(c.q.x - c.p.x, c.q.y - c.p.y);
+    if (seg <= 32 || c.alpha <= 0.08) return;
+    const ang = Math.atan2(c.q.y - c.c.y, c.q.x - c.c.x);
+    const sz = size ?? Math.min(4 + c.width * 1.5, seg * 0.25);
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.moveTo(c.q.x, c.q.y);
+    ctx.lineTo(c.q.x - sz * Math.cos(ang - 0.45), c.q.y - sz * Math.sin(ang - 0.45));
+    ctx.lineTo(c.q.x - sz * Math.cos(ang + 0.45), c.q.y - sz * Math.sin(ang + 0.45));
+    ctx.closePath();
+    ctx.fillStyle = withAlpha(c.color, Math.min(1, c.alpha * 1.2));
+    ctx.fill();
+  }
+
+  /** The part of a resting line inside its end tiles is drawn again over the tile, with a small source dot
+   *  and the arrowhead, so a link visibly plugs into both tiles instead of ending in the gap between them. */
+  function drawSockets(ctx: CanvasRenderingContext2D, c: Curve) {
+    const ends = [c.a, c.b].filter((st) => st.n.box && st.t < 0.5);
+    if (!ends.length) return;
+    for (const st of ends) {
+      ctx.save();
+      roundRect(ctx, st.sx, st.sy, st.sw, st.sh, boxRadius(st.sw, st.sh));
+      ctx.clip();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = withAlpha(c.color, Math.min(1, c.alpha * 1.15));
+      ctx.lineWidth = c.width;
+      ctx.lineCap = "round";
+      ctx.setLineDash(c.dash.map((d) => d * Math.max(1, c.width * 0.8)));
+      curvePath(ctx, c);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+    if (c.a.n.box && c.a.t < 0.5 && c.inA && c.alpha > 0.08) {
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.arc(c.p.x, c.p.y, 2.5, 0, Math.PI * 2);
+      ctx.fillStyle = withAlpha(c.color, Math.min(1, c.alpha * 1.2));
+      ctx.fill();
+    }
+    if (c.arrow && c.inB && c.b.n.box && c.b.t < 0.5) drawArrow(ctx, c);
+  }
+
+  /** The selection softly veils everything else (an open selected box stays unveiled); the selected item and
+   *  the things it connects to are drawn again on top, at their normal look. */
+  function drawVeil(ctx: CanvasRenderingContext2D, selSt: NodeState, states: Map<string, NodeState>) {
+    const s = S.current;
+    ctx.globalAlpha = VEIL * s.emphSel;
+    ctx.fillStyle = MAP_BG;
+    ctx.beginPath();
+    ctx.rect(0, 0, s.w, s.h);
+    const openSel = selSt.n.box && selSt.t >= 0.5;
+    if (openSel) roundRectPath(ctx, selSt.sx, selSt.sy, selSt.sw, selSt.sh, boxRadius(selSt.sw, selSt.sh));
+    ctx.fill("evenodd");
+    const inside = subtree(selSt.n.id);
+    const lit = new Map<string, number>();
+    if (!openSel) lit.set(selSt.n.id, Infinity);
+    for (const c of s.curves) {
+      if (!c.sel) continue;
+      const other = inside?.has(c.a.n.id) ? c.b : c.a;
+      lit.set(other.n.id, Math.max(lit.get(other.n.id) ?? 0, c.width * c.alpha));
+    }
+    let pills = 0;
+    for (const [id] of [...lit.entries()].sort((x, y) => y[1] - x[1])) {
+      const st = states.get(id);
+      if (!st || !st.onScreen) continue;
+      if (st.n.box) drawBox(ctx, st);
+      else {
+        drawChip(ctx, st);
+        // a far-away neighbour (a dot) gets its name, for the 12 strongest
+        const g = chipGeom(ctx, st);
+        if (g.ca < 0.5 && pills < 12) {
+          pills++;
+          queuePill(ctx, st.n.label, g.x + g.ch * 0.5, g.cy + 6, 1e9 - pills, st.da);
+        }
+      }
+    }
+    drawLabels();
+  }
+
+  /** One short glint along each of the selection's strongest lines when it is made, showing direction. */
+  function drawGlint(ctx: CanvasRenderingContext2D, now: number): boolean {
+    const s = S.current;
+    if (!s.selected || s.reduced || document.visibilityState !== "visible") return false;
+    const age = now - s.selAt;
+    if (age > 700) return false;
+    const lit = s.curves.filter((c) => c.sel);
+    if (!lit.length || lit.length > 12) return true;
+    const u = EASE_FLY(clamp((age - 100) / 600, 0, 1));
+    if (u <= 0 || u >= 1) return true;
+    for (const c of [...lit].sort((x, y) => y.width - x.width).slice(0, 6)) {
+      const x = (1 - u) * (1 - u) * c.p.x + 2 * (1 - u) * u * c.c.x + u * u * c.q.x;
+      const y = (1 - u) * (1 - u) * c.p.y + 2 * (1 - u) * u * c.c.y + u * u * c.q.y;
+      ctx.globalAlpha = Math.sin(u * Math.PI) * 0.9;
+      ctx.beginPath();
+      ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+    }
+    return true;
+  }
+
+  /** Selection: a blue ring (the app accent) that grows in; hover: a quiet light ring. An open box gets a thin
+   *  outline instead, so the room you are in does not glow. */
+  function drawRing(ctx: CanvasRenderingContext2D, id: string, selectedRing: boolean, now: number) {
+    const target = standIn(id);
     if (!target) return;
     const a = anchor(target);
     const open = target.n.box && target.t >= 0.5;
     const r = target.n.box ? boxRadius(target.sw, target.sh) : Math.min(a.hh, a.hw);
-    const pad = open ? 0 : 2;
-    ctx.globalAlpha = selectedRing ? 1 : 0.7;
+    const grow = selectedRing && !S.current.reduced ? smooth(0, 180, now - S.current.selAt) : 1;
+    const pad = open ? 0 : 2 + 4 * (1 - grow);
+    ctx.globalAlpha = (selectedRing ? 1 : 0.7) * Math.max(0.3, grow);
     if (selectedRing && !open) {
       ctx.shadowColor = withAlpha(ACCENT, 0.5);
       ctx.shadowBlur = 6;
     }
     ctx.lineWidth = open ? 1 : selectedRing ? 2 : 1.5;
     ctx.strokeStyle = selectedRing ? ACCENT : HOVER_RING;
-    roundRect(ctx, a.cx - a.hw - pad, a.cy - a.hh - pad, a.hw * 2 + pad * 2, a.hh * 2 + pad * 2, r + pad);
+    const box = target.n.box ? { x: target.sx, y: target.sy, w: target.sw, h: target.sh } : { x: a.cx - a.hw, y: a.cy - a.hh, w: a.hw * 2, h: a.hh * 2 };
+    roundRect(ctx, box.x - pad, box.y - pad, box.w + pad * 2, box.h + pad * 2, r + pad);
     ctx.stroke();
     ctx.shadowBlur = 0;
     ctx.shadowColor = "transparent";
   }
 
+  /** After a flight lands: a ring grows out of the target once (twice from search), so the eye finds it. */
+  function drawPulse(ctx: CanvasRenderingContext2D, now: number): boolean {
+    const s = S.current;
+    if (!s.pulse) return false;
+    const age = now - s.pulse.t0;
+    if (age > 650 * s.pulse.count || s.reduced) {
+      s.pulse = null;
+      return false;
+    }
+    const target = standIn(s.pulse.id);
+    if (!target) return true;
+    const u = (age % 650) / 650;
+    const a = anchor(target);
+    const grow = 18 * EASE_FLY(u);
+    ctx.globalAlpha = 0.65 * (1 - u);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = ACCENT;
+    roundRect(ctx, a.cx - a.hw - grow, a.cy - a.hh - grow, (a.hw + grow) * 2, (a.hh + grow) * 2, 8 + grow);
+    ctx.stroke();
+    return true;
+  }
+
   function updateCrumbs(model: MapModel, states: Map<string, NodeState>) {
     const s = S.current;
-    const cx = s.w / 2;
-    const cy = s.h / 2;
+    const vr = visibleRect();
+    const cx = vr.x + vr.w / 2;
+    const cy = vr.y + vr.h / 2;
     let deepest: NodeState | undefined;
     for (const st of states.values()) {
       if (!st.n.box || st.t < 0.5 || st.vis < 0.5) continue;
@@ -899,23 +1405,39 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
   }
 
   // ---- picking -------------------------------------------------------------------------------------
-  function pick(px: number, py: number): NodeState | null {
+  /** What is under the pointer: a closed tile, a symbol, or an open box's title band (clickable). */
+  function pick(px: number, py: number): { st: NodeState; title: boolean } | null {
     const s = S.current;
     if (!s.model) return null;
     let hit: NodeState | null = null;
+    let title = false;
     for (const st of s.states.values()) {
       if (st.vis < 0.5 || !st.onScreen) continue;
       if (st.n.box) {
-        if (st.t >= 0.5) continue; // open frames are see-through
-        if (px >= st.sx && px <= st.sx + st.sw && py >= st.sy && py <= st.sy + st.sh) {
-          if (!hit || st.n.depth >= hit.n.depth) hit = st;
+        if (px < st.sx || px > st.sx + st.sw || py < st.sy || py > st.sy + st.sh) continue;
+        if (st.t >= 0.5) {
+          // open frames are see-through, except their title band
+          const strip = stripPx(st.n);
+          const titleA = st.da * smooth(0.05, 0.3, st.t);
+          if (strip >= 12 && titleA > 0.5 && py <= st.sy + strip && (!hit || st.n.depth >= hit.n.depth)) {
+            hit = st;
+            title = true;
+          }
+          continue;
+        }
+        if (!hit || st.n.depth >= hit.n.depth) {
+          hit = st;
+          title = false;
         }
       } else {
         const a = anchor(st);
-        if (Math.abs(px - a.cx) <= a.hw && Math.abs(py - a.cy) <= a.hh) hit = st;
+        if (Math.abs(px - a.cx) <= a.hw && Math.abs(py - a.cy) <= a.hh) {
+          hit = st;
+          title = false;
+        }
       }
     }
-    return hit;
+    return hit ? { st: hit, title } : null;
   }
 
   /** Re-check what is under a resting pointer after the camera moved (zoom with the mouse held still). */
@@ -923,9 +1445,10 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     const s = S.current;
     if (!s.ptr) return;
     const hit = pick(s.ptr.x, s.ptr.y);
-    const id = hit?.n.id ?? null;
+    const id = hit?.st.n.id ?? null;
     if (id !== s.hover) {
       s.hover = id;
+      s.hoverTitle = !!hit?.title;
       requestDraw();
     }
     if (s.tipShown) {
@@ -936,50 +1459,64 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
 
   // ---- camera ----------------------------------------------------------------------------------------
   function transformFor(x1: number, y1: number, x2: number, y2: number, pad = 0.08): ZoomTransform {
-    const s = S.current;
+    const vr = visibleRect();
     const w = Math.max(1, x2 - x1);
     const h = Math.max(1, y2 - y1);
-    // keep the content above an overlay at the bottom (the key), unless that would leave too little room
-    const inset = s.insetBottom < s.h * 0.35 ? s.insetBottom : 0;
-    const ah = s.h - inset;
-    const k = Math.min(s.w / (w * (1 + 2 * pad)), ah / (h * (1 + 2 * pad)), MAX_ZOOM);
-    return zoomIdentity.translate(s.w / 2 - ((x1 + x2) / 2) * k, ah / 2 - ((y1 + y2) / 2) * k).scale(k);
+    // keep the content in the part of the map not covered by the key or the details panel
+    const k = Math.min(vr.w / (w * (1 + 2 * pad)), vr.h / (h * (1 + 2 * pad)), MAX_ZOOM);
+    return zoomIdentity.translate(vr.x + vr.w / 2 - ((x1 + x2) / 2) * k, vr.y + vr.h / 2 - ((y1 + y2) / 2) * k).scale(k);
   }
 
-  function fly(t: ZoomTransform) {
+  function rectTransform(n: MapNode, pad = 0.08) {
+    const r = n.rect;
+    return transformFor(r.x - r.w / 2, r.y - r.h / 2, r.x + r.w / 2, r.y + r.h / 2, pad);
+  }
+
+  function fly(t: ZoomTransform, opts: { duration?: number; pulse?: { id: string; count: number } } = {}) {
     const s = S.current;
     const canvas = canvasRef.current;
     if (!canvas || !s.zoom) return;
     const sel = select(canvas);
     const v = s.view;
-    if (Math.abs(t.x - v.x) < 4 && Math.abs(t.y - v.y) < 4 && Math.abs(t.k / v.k - 1) < 0.02) return; // already there
+    const startPulse = () => {
+      if (opts.pulse) s.pulse = { id: opts.pulse.id, t0: performance.now(), count: opts.pulse.count };
+      requestDraw();
+    };
+    if (Math.abs(t.x - v.x) < 4 && Math.abs(t.y - v.y) < 4 && Math.abs(t.k / v.k - 1) < 0.02) {
+      startPulse(); // already there: just show where
+      return;
+    }
     sel.interrupt();
+    s.atHome = false;
     if (document.visibilityState !== "visible" || s.reduced) {
       s.zoom.transform(sel, t);
+      startPulse();
       return;
     }
     // start from what is drawn (not d3's target, which may be ahead mid-glide), so a flight never jumps
     s.glide = false;
     s.flying = true;
-    s.atHome = false;
     s.anchor = null;
+    s.pulse = null;
     s.zoom.transform(sel, zoomIdentity.translate(v.x, v.y).scale(v.k));
-    // short hops are quick, long trips unhurried: scale d3's own estimate of the "zoom out, travel, zoom
-    // in" path length
+    // short hops are quick, long trips unhurried: scale d3's own estimate of the zoom path length
     const p0: [number, number, number] = [(s.w / 2 - v.x) / v.k, (s.h / 2 - v.y) / v.k, s.w / v.k];
     const p1: [number, number, number] = [(s.w / 2 - t.x) / t.k, (s.h / 2 - t.y) / t.k, s.w / t.k];
-    const duration = clamp(0.6 * interpolateZoom(p0, p1).duration, 400, 1100);
+    const duration = opts.duration ?? clamp(0.6 * interpolateZoom(p0, p1).duration, 400, 1100);
+    const finish = (landed: boolean) => {
+      s.glide = true;
+      s.flying = false;
+      s.lastScaleAt = performance.now();
+      if (landed) startPulse();
+      requestDraw();
+    };
     sel
       .transition()
       .duration(duration)
       .ease(EASE_FLY)
       .call(s.zoom.transform, t)
-      .on("end interrupt", () => {
-        s.glide = true;
-        s.flying = false;
-        s.lastScaleAt = performance.now();
-        requestDraw();
-      });
+      .on("end", () => finish(true))
+      .on("interrupt", () => finish(false));
   }
 
   function homeTransform(): ZoomTransform | null {
@@ -995,24 +1532,72 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     );
   }
 
-  function zoomTo(id: string) {
+  function zoomTo(id: string, opts: { pulse?: number } = {}) {
     const m = S.current.model;
     const n = m?.nodes.get(id);
     if (!m || !n) return;
     const target = n.box ? n : (m.nodes.get(n.parent ?? "") ?? n);
-    const r = target.rect;
-    fly(transformFor(r.x - r.w / 2, r.y - r.h / 2, r.x + r.w / 2, r.y + r.h / 2));
+    fly(rectTransform(target), opts.pulse ? { pulse: { id, count: opts.pulse } } : {});
+  }
+
+  function fitAll() {
+    const h = homeTransform();
+    if (h) fly(h);
   }
 
   /** One level out: the parent of the box you are in, or the overview. */
-  function zoomOut() {
+  function upOneLevel() {
     const s = S.current;
     const up = s.crumbIds.length >= 2 ? s.crumbIds[s.crumbIds.length - 2] : null;
     if (up) zoomTo(up);
-    else {
-      const h = homeTransform();
-      if (h) fly(h);
-    }
+    else fitAll();
+  }
+
+  /** Fit the box you are in (the deepest open box at the centre). */
+  function fitCurrent() {
+    const s = S.current;
+    const id = s.crumbIds[s.crumbIds.length - 1];
+    if (id) zoomTo(id);
+    else fitAll();
+  }
+
+  function zoomBy(f: number) {
+    const s = S.current;
+    const canvas = canvasRef.current;
+    if (!canvas || !s.zoom) return;
+    const vr = visibleRect();
+    const c: Pt = { x: vr.w / 2, y: vr.h / 2 };
+    s.zoom.scaleBy(select(canvas), f, [c.x, c.y]);
+    s.anchor = c; // glide about the centre of the visible map
+    s.atHome = false;
+  }
+
+  function panBy(dx: number, dy: number) {
+    const s = S.current;
+    const canvas = canvasRef.current;
+    if (!canvas || !s.zoom) return;
+    s.zoom.translateBy(select(canvas), dx / s.target.k, dy / s.target.k);
+    s.atHome = false;
+  }
+
+  /** Bring a node into the part of the map not covered by the panel, by the smallest pan. */
+  function ensureVisible(id: string) {
+    const s = S.current;
+    if (!s.homed || s.flying) return;
+    const st = standIn(id);
+    if (!st) return;
+    const vr = visibleRect();
+    const m = 48;
+    const an = anchor(st);
+    const a = { x1: an.cx - an.hw, y1: an.cy - an.hh, x2: an.cx + an.hw, y2: an.cy + an.hh };
+    let dx = 0, dy = 0;
+    if (a.x2 > vr.w - m) dx = vr.w - m - a.x2;
+    if (a.x1 + dx < m) dx = m - a.x1;
+    if (a.y2 > vr.h - m) dy = vr.h - m - a.y2;
+    if (a.y1 + dy < m) dy = m - a.y1;
+    if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
+    const v = s.view;
+    fly(zoomIdentity.translate(v.x + dx, v.y + dy).scale(v.k), { duration: 450 });
   }
 
   function zoomToPath(path: string) {
@@ -1033,8 +1618,43 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     );
   }
 
+  /** Smart double-click: into a tile; a chip is selected and pinged; a title or empty space steps out. */
+  function onDoubleClick(px: number, py: number) {
+    const s = S.current;
+    const hit = pick(px, py);
+    if (hit && !hit.title && hit.st.n.box) return zoomTo(hit.st.n.id);
+    if (hit && !hit.title) {
+      const ctx = canvasRef.current!.getContext("2d")!;
+      if (chipGeom(ctx, hit.st).ca < 0.5) return zoomTo(hit.st.n.id, { pulse: 1 });
+      if (!isSynthetic(hit.st.n.id)) {
+        s.selected = hit.st.n.id;
+        s.selAt = performance.now();
+        cb.current.onSelect(hit.st.n.id);
+      }
+      s.pulse = { id: hit.st.n.id, t0: performance.now(), count: 1 };
+      requestDraw();
+      return;
+    }
+    if (hit && hit.title) {
+      const parent = hit.st.n.parent && s.model?.nodes.has(hit.st.n.parent) ? hit.st.n.parent : null;
+      return parent ? zoomTo(parent) : fitAll();
+    }
+    // empty space: fit the open box around the point if it is not fitted yet, else step out of it
+    let room: NodeState | undefined;
+    for (const st of s.states.values()) {
+      if (!st.n.box || st.t < 0.5 || st.vis < 0.5) continue;
+      if (px < st.sx || px > st.sx + st.sw || py < st.sy || py > st.sy + st.sh) continue;
+      if (!room || st.n.depth > room.n.depth) room = st;
+    }
+    if (!room) return fitAll();
+    if (s.view.k < 0.9 * rectTransform(room.n).k) return zoomTo(room.n.id);
+    const parent = room.n.parent && s.model?.nodes.has(room.n.parent) ? room.n.parent : null;
+    return parent ? zoomTo(parent) : fitAll();
+  }
+
   /** Size the canvas to its container. Measured directly (not only via ResizeObserver, which stays silent
-   *  while a tab is hidden and for some first layouts). Returns whether there is room to draw. */
+   *  while a tab is hidden and for some first layouts). Keeps the centre in place when the window resizes.
+   *  Returns whether there is room to draw. */
   function fitCanvas(): boolean {
     const s = S.current;
     const canvas = canvasRef.current;
@@ -1043,6 +1663,8 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     const r = wrap.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     if (r.width !== s.w || r.height !== s.h || dpr !== s.dpr) {
+      const dx = s.homed && s.w > 2 && r.width > 2 ? (r.width - s.w) / 2 : 0;
+      const dy = s.homed && s.h > 2 && r.height > 2 ? (r.height - s.h) / 2 : 0;
       s.dpr = dpr;
       s.w = r.width;
       s.h = r.height;
@@ -1050,6 +1672,11 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       canvas.height = Math.round(r.height * dpr);
       canvas.style.width = `${r.width}px`;
       canvas.style.height = `${r.height}px`;
+      if ((dx || dy) && s.zoom) {
+        s.view.x += dx;
+        s.view.y += dy;
+        s.zoom.transform(select(canvas), zoomIdentity.translate(s.target.x + dx, s.target.y + dy).scale(s.target.k));
+      }
     }
     return s.w >= 2 && s.h >= 2;
   }
@@ -1064,6 +1691,15 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     if (!home || !Number.isFinite(home.k) || home.k <= 0) return;
     s.homeK = home.k;
     s.zoom.scaleExtent([home.k * 0.5, MAX_ZOOM]);
+    // the map cannot be flung away: the camera stays within the map's bounds plus a margin
+    const tops = s.model.roots.map((r) => s.model!.nodes.get(r)!.rect);
+    const x1 = Math.min(...tops.map((r) => r.x - r.w / 2)), x2 = Math.max(...tops.map((r) => r.x + r.w / 2));
+    const y1 = Math.min(...tops.map((r) => r.y - r.h / 2)), y2 = Math.max(...tops.map((r) => r.y + r.h / 2));
+    const mx = (x2 - x1) * 0.25, my = (y2 - y1) * 0.25;
+    s.zoom.translateExtent([
+      [x1 - mx, y1 - my],
+      [x2 + mx, y2 + my],
+    ]);
     s.zoom.transform(select(canvas), home);
     s.view = { k: home.k, x: home.x, y: home.y };
     s.homed = true;
@@ -1075,9 +1711,9 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     }
   }
 
-  const api = useRef({ zoomTo, zoomOut, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome, fitCanvas });
+  const api = useRef({ zoomTo, upOneLevel, fitCurrent, fitAll, zoomBy, panBy, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome, fitCanvas, ensureVisible, onDoubleClick });
   useEffect(() => {
-    api.current = { zoomTo, zoomOut, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome, fitCanvas };
+    api.current = { zoomTo, upOneLevel, fitCurrent, fitAll, zoomBy, panBy, zoomToPath, homeTransform, fly, draw, pick, requestDraw, goHome, fitCanvas, ensureVisible, onDoubleClick };
   });
 
   // ---- set up canvas, input and resize once ------------------------------------------------------------
@@ -1085,6 +1721,9 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     const canvas = canvasRef.current!;
     const wrap = wrapRef.current!;
     const s = S.current;
+    // draw in the same font as the rest of the app
+    const appFont = getComputedStyle(document.body).fontFamily;
+    if (appFont) SANS = appFont;
 
     const resize = () => {
       api.current.fitCanvas();
@@ -1119,13 +1758,16 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       })
       .on("zoom", (e) => {
         const src = e.sourceEvent as (Event & { type: string }) | null;
-        if (src) s.atHome = false;
+        if (src) {
+          s.atHome = false;
+          s.pulse = null; // the user took over: no landing ping
+        }
         if (Math.abs(Math.log(e.transform.k) - Math.log(s.target.k)) > 1e-3) s.lastScaleAt = performance.now();
         s.target = e.transform;
         if (src?.type === "wheel") {
           const [px, py] = pointer(src, canvas);
           s.anchor = { x: px, y: py };
-        } else if (!src) s.anchor = null;
+        }
         // dragging and pinching follow the fingers exactly; wheel zoom glides
         if (src && (src.type === "mousemove" || src.type === "pointermove" || src.type === "touchmove")) {
           s.view = { k: e.transform.k, x: e.transform.x, y: e.transform.y };
@@ -1149,16 +1791,17 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       const p = local(e);
       s.ptr = p;
       const hit = api.current.pick(p.x, p.y);
-      const id = hit?.n.id ?? null;
+      const id = hit?.st.n.id ?? null;
       if (!s.held) canvas.style.cursor = hit ? "pointer" : "grab";
-      if (id !== s.hover) {
+      if (id !== s.hover || !!hit?.title !== s.hoverTitle) {
         s.hover = id;
+        s.hoverTitle = !!hit?.title;
         api.current.requestDraw();
       }
-      const show = !!hit && !s.held && (!hit.n.box || hit.nameHidden);
+      const show = !!hit && !s.held && !hit.title && (!hit.st.n.box || hit.st.nameHidden);
       if (show) {
         s.tipShown = true;
-        setTip({ x: p.x, y: p.y, node: hit!.n });
+        setTip({ x: p.x, y: p.y, node: hit!.st.n });
       } else if (s.tipShown) {
         s.tipShown = false;
         setTip(null);
@@ -1172,18 +1815,20 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       api.current.requestDraw();
     };
     // d3-zoom swallows mousedown, so a drag is told apart from a click with pointer events
-    let down: { x: number; y: number } | null = null;
+    let down: Pt | null = null;
     const onDown = (e: PointerEvent) => {
       down = { x: e.clientX, y: e.clientY };
+      wrap.focus({ preventScroll: true });
     };
     // A click selects at once (ring on the map), but tells the page only after a moment, so a double-click
-    // can fly without first opening the details panel (which resizes the map).
+    // can fly without first opening the details panel.
     let clickTimer = 0;
     const onClick = (e: MouseEvent) => {
       if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return; // that was a drag
       const p = local(e);
       const hit = api.current.pick(p.x, p.y);
-      const id = hit && !isSynthetic(hit.n.id) ? hit.n.id : null;
+      const id = hit && !isSynthetic(hit.st.n.id) ? hit.st.n.id : null;
+      if (id !== s.selected) s.selAt = performance.now();
       s.selected = id;
       api.current.requestDraw();
       window.clearTimeout(clickTimer);
@@ -1193,9 +1838,57 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       window.clearTimeout(clickTimer);
       s.selected = s.selProp; // the double-click flies; it does not change the selection
       const p = local(e);
-      const hit = api.current.pick(p.x, p.y);
-      if (hit) api.current.zoomTo(hit.n.id);
-      else api.current.zoomOut(); // empty space: one level out
+      api.current.onDoubleClick(p.x, p.y);
+    };
+    // keyboard: the map is focusable; keys are ignored while typing in a field
+    const onKey = (e: KeyboardEvent) => {
+      const tgt = e.target as HTMLElement | null;
+      if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable)) return;
+      const step = (d: number) => (e.shiftKey ? d * 0.4 : 120);
+      let handled = true;
+      switch (e.key) {
+        case "Backspace":
+          api.current.upOneLevel();
+          break;
+        case "Escape":
+          window.clearTimeout(clickTimer);
+          s.selected = null;
+          cb.current.onSelect(null);
+          api.current.requestDraw();
+          break;
+        case "Enter": {
+          const id = s.hover ?? s.selected;
+          if (id) api.current.zoomTo(id, { pulse: 1 });
+          break;
+        }
+        case "0":
+        case "Home":
+          api.current.fitAll();
+          break;
+        case "+":
+        case "=":
+          api.current.zoomBy(1.5);
+          break;
+        case "-":
+        case "_":
+          api.current.zoomBy(1 / 1.5);
+          break;
+        case "ArrowLeft":
+          api.current.panBy(step(s.w), 0);
+          break;
+        case "ArrowRight":
+          api.current.panBy(-step(s.w), 0);
+          break;
+        case "ArrowUp":
+          api.current.panBy(0, step(s.h));
+          break;
+        case "ArrowDown":
+          api.current.panBy(0, -step(s.h));
+          break;
+        default:
+          handled = false;
+      }
+      if (handled) e.preventDefault();
     };
     // self-healing: redraw after a GPU reset or when the tab becomes visible again
     const onRestored = () => api.current.requestDraw();
@@ -1211,13 +1904,14 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     canvas.addEventListener("click", onClick);
     canvas.addEventListener("dblclick", onDbl);
     canvas.addEventListener("contextrestored", onRestored);
+    wrap.addEventListener("keydown", onKey);
     document.addEventListener("visibilitychange", onVisible);
 
     // debugging/verification hook (no UI effect)
     (canvas as unknown as { __archon: unknown }).__archon = {
       state: s,
       draw: () => api.current.draw(),
-      pick: (x: number, y: number) => api.current.pick(x, y)?.n ?? null,
+      pick: (x: number, y: number) => api.current.pick(x, y)?.st.n ?? null,
       zoomTo: (id: string) => api.current.zoomTo(id),
     };
 
@@ -1232,12 +1926,12 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
     }
 
     cb.current.onReady?.({
-      zoomTo: (id) => api.current.zoomTo(id),
+      zoomTo: (id, opts) => api.current.zoomTo(id, opts),
       zoomToPath: (path) => api.current.zoomToPath(path),
-      reset: () => {
-        const h = api.current.homeTransform();
-        if (h) api.current.fly(h);
-      },
+      reset: () => api.current.fitAll(),
+      upOneLevel: () => api.current.upOneLevel(),
+      zoomBy: (f) => api.current.zoomBy(f),
+      fitCurrent: () => api.current.fitCurrent(),
     });
 
     return () => {
@@ -1252,6 +1946,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       canvas.removeEventListener("click", onClick);
       canvas.removeEventListener("dblclick", onDbl);
       canvas.removeEventListener("contextrestored", onRestored);
+      wrap.removeEventListener("keydown", onKey);
       document.removeEventListener("visibilitychange", onVisible);
       window.clearTimeout(clickTimer);
       window.clearInterval(dbgTimer);
@@ -1277,6 +1972,8 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       s.model = model;
       s.anim.clear();
       s.subtrees.clear();
+      s.curveChoice.clear();
+      s.classBorder.clear();
       s.drawError = "";
       setLayout({ state: "idle" });
       emitKey(model);
@@ -1313,7 +2010,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
       .map((id) => model.nodes.get(id)!)
       .filter((n) => n.box && !n.neutral)
       .sort((a, b) => a.label.localeCompare(b.label))
-      .map((n) => ({ id: n.id, label: n.label, top: tint(n.hue, 0.34), bottom: tint(n.hue, 0.22), border: withAlpha(n.hue, 0.7) }));
+      .map((n) => ({ id: n.id, label: n.label, top: n.pal.tileTop, bottom: n.pal.tileBottom, border: n.pal.tileBorder }));
     const symbols = new Set<NodeKind>();
     for (const n of model.nodes.values()) if (!n.box && n.kind !== "file" && n.kind !== "directory") symbols.add(n.kind as NodeKind);
     const lines = new Set<EdgeKind>();
@@ -1326,20 +2023,33 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
   }
 
   return (
-    <div ref={wrapRef} className="absolute inset-0 overflow-hidden" style={{ background: BG }}>
+    <div
+      ref={wrapRef}
+      tabIndex={0}
+      aria-label="Code map. Scroll to zoom, drag to pan, Backspace to go up a level, 0 to fit all."
+      className="absolute inset-0 overflow-hidden outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+      style={{ background: MAP_BG }}
+    >
       <canvas ref={canvasRef} className="block touch-none select-none" style={{ cursor: "grab", opacity: 0 }} />
       {tip && (
         <div
-          className="pointer-events-none absolute z-20 rounded-md border border-line bg-[#151922]/95 px-2.5 py-1.5 text-[11px] shadow-xl backdrop-blur"
-          style={{ left: Math.min(tip.x + 14, (S.current.w || 400) - 280), top: tip.y + 16, maxWidth: 280 }}
+          className="pointer-events-none absolute z-20 rounded-md border border-line px-2.5 py-1.5 text-[11px] shadow-xl"
+          style={{ left: Math.min(tip.x + 14, (S.current.w || 400) - 300), top: tip.y + 16, maxWidth: 300, background: "#151922f2" }}
         >
           <div className="mono text-fg break-all">{tip.node.fullLabel}</div>
+          {tip.node.detail && <div className="mono text-muted break-all">{tip.node.detail}</div>}
           {tip.node.path && <div className="text-faint truncate">{tip.node.path}</div>}
           {(tip.node.summary.length > 0 || tip.node.lines > 0) && (
             <div className="text-muted mt-0.5">
               {[...tip.node.summary, tip.node.lines > 0 ? `${tip.node.lines} lines` : ""].filter(Boolean).join(" · ")}
             </div>
           )}
+        </div>
+      )}
+      {focusHint && (
+        <div className="absolute top-3 left-3 z-10 chip pointer-events-none" style={{ background: "#151922e6" }}>
+          <span className="h-0.5 w-3 rounded" style={{ background: FOCUS_OUT }} /> uses
+          <span className="h-0.5 w-3 rounded ml-2" style={{ background: FOCUS_IN }} /> used by
         </div>
       )}
       {layout.state === "running" && (
@@ -1352,7 +2062,7 @@ export function MapCanvas({ graph, selected, onSelect, onCrumbs, onReady, onKey,
         <div className="absolute top-3 right-3 z-10 chip text-danger border-danger/40">{layout.message}</div>
       )}
       {debug && (
-        <div className="absolute top-3 left-3 z-20 chip mono pointer-events-none text-[10px]">
+        <div className="absolute bottom-16 right-3 z-20 chip mono pointer-events-none text-[10px]">
           frame p50 {debug.p50.toFixed(1)} ms · p95 {debug.p95.toFixed(1)} ms · boxes {debug.boxes} · half-open {debug.half} ·{" "}
           {debug.settled ? "settled" : "moving"} · k {debug.k.toFixed(3)}
         </div>
