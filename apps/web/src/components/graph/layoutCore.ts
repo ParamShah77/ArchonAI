@@ -1,26 +1,21 @@
 /**
- * Pure layout computation (no DOM), used by the layout Web Worker (decisions.md D-022, D-023).
+ * Pure layout computation (no DOM), used by the layout Web Worker (decisions.md D-022, D-023, D-027).
  *
- * Structure first, physics second:
- * 1. Every box (folder, file holding symbols, packages group) packs its children in tidy rows —
- *    sub-boxes first (largest first), then leaves in a stable order. Overlap is impossible by
- *    construction and the same repository always looks the same.
- * 2. Only the top-level items (boxes as solid blocks, loose nodes) are placed by fCoSE, using edges
- *    lifted to those items, so related parts of the system still sit near each other.
- * 3. A final pass pushes apart any top-level blocks that still touch.
+ * Every box (folder, file holding symbols, packages group) and the top level itself pack their children
+ * in tidy rows: sub-boxes first (tallest first), then leaves in a stable order. Overlap is impossible by
+ * construction and the same repository always looks the same.
+ *
+ * Row width is chosen per box by trying a range of widths and scoring each result for (a) how close the
+ * finished box is to the screen's shape and (b) how little of it is empty, so a box you fly into fills the
+ * screen instead of standing as a tall narrow column.
  */
-import cytoscape from "cytoscape";
-import fcose from "cytoscape-fcose";
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-cytoscape.use(fcose as any);
 
 export interface LayoutNode {
   id: string;
   parent?: string;
-  w: number; // footprint: node + its label
+  w: number; // footprint
   h: number;
-  size: number; // drawn node diameter (the label hangs below it)
+  size: number;
   sortKey: string;
 }
 
@@ -37,13 +32,13 @@ export interface LayoutResponse {
   ms: number;
 }
 
-export const BOX_PADDING = 16; // must match the `:parent` padding in GraphCanvas
+export const BOX_PADDING = 16;
 const GAP_X = 14;
 const GAP_Y = 10;
 const ROOT_GAP = 40;
-const ROOT_PACK_MAX = 12; // up to this many top-level blocks are packed in rows; more use fCoSE
-const ASPECT = 1.7; // preferred width/height of a packed box
-const LABEL_SLOT = 18; // must match viewModel.LABEL_SLOT
+// Geometric mean of the map's shape with the details panel open (≈1.34) and closed (≈1.86).
+const TARGET_ASPECT = 1.55;
+const TRIES = 24;
 
 /** Title band at the top of a box; grows with the box so its title stays legible when zoomed out. */
 export function headerFor(w: number): number {
@@ -70,149 +65,116 @@ interface Item {
   y: number;
 }
 
-function pack(item: Item, gx = GAP_X, gy = GAP_Y, recurse = true): void {
-  if (item.leaf) {
-    item.w = item.leaf.w;
-    item.h = item.leaf.h;
-    return;
-  }
-  if (recurse) for (const c of item.children) pack(c);
-  const kids = [...item.children].sort((a, b) => {
-    if (!!a.leaf !== !!b.leaf) return a.leaf ? 1 : -1; // boxes before loose leaves
-    if (!a.leaf && !b.leaf) return b.h - a.h || b.w - a.w; // tallest first: rows of similar height waste less space
-    return (a.leaf!.sortKey < b.leaf!.sortKey ? -1 : 1);
-  });
-  const area = kids.reduce((s, k) => s + (k.w + gx) * (k.h + gy), 0);
-  const maxW = Math.max(0, ...kids.map((k) => k.w));
-  const target = Math.max(maxW, Math.sqrt(area * ASPECT));
-  // shelf packing: fill a row up to the target width, then start the next row
+interface Shelf {
+  w: number;
+  h: number;
+  cols: number; // most items in one row
+  place: { x: number; y: number }[]; // centres, same order as the input
+}
+
+/** Shelf packing: fill a row up to `target` width, then start the next; rows centred horizontally. */
+function shelf(kids: Item[], target: number, gx: number, gy: number): Shelf {
+  const place: { x: number; y: number }[] = [];
+  const rows: { right: number; items: number[] }[] = [];
   let x = 0, y = 0, rowH = 0, contentW = 0;
-  for (const k of kids) {
+  for (let i = 0; i < kids.length; i++) {
+    const k = kids[i];
     if (x > 0 && x + k.w > target) {
       y += rowH + gy;
       x = 0;
       rowH = 0;
     }
-    k.x = x + k.w / 2;
-    k.y = y + k.h / 2;
+    if (x === 0) rows.push({ right: 0, items: [] });
+    const row = rows[rows.length - 1];
+    place.push({ x: x + k.w / 2, y: y + k.h / 2 });
+    row.items.push(i);
     x += k.w + gx;
+    row.right = x - gx;
     rowH = Math.max(rowH, k.h);
     contentW = Math.max(contentW, x - gx);
   }
-  const contentH = y + rowH;
-  // centre each row horizontally inside the box for a tidier look
-  const rows = new Map<number, Item[]>();
-  for (const k of kids) {
-    const top = Math.round(k.y - k.h / 2);
-    if (!rows.has(top)) rows.set(top, []);
-    rows.get(top)!.push(k);
+  for (const row of rows) {
+    const shift = (contentW - row.right) / 2;
+    for (const i of row.items) place[i].x += shift;
   }
-  for (const row of rows.values()) {
-    const right = Math.max(...row.map((k) => k.x + k.w / 2));
-    const shift = (contentW - right) / 2;
-    for (const k of row) k.x += shift;
-  }
-  item.children = kids;
-  item.w = contentW + 2 * BOX_PADDING;
-  item.header = headerFor(item.w);
-  item.h = contentH + 2 * BOX_PADDING + item.header;
+  return { w: contentW, h: y + rowH, cols: Math.max(0, ...rows.map((r) => r.items.length)), place };
 }
 
-function placeRoot(roots: Item[], rootOf: Map<string, string>, edges: [string, string][]): void {
+/** Pick the row width whose finished box best matches the screen's shape with the least empty space. */
+function bestShelf(kids: Item[], gx: number, gy: number, withHeader: boolean): Shelf {
+  const area = kids.reduce((s, k) => s + (k.w + gx) * (k.h + gy), 0);
+  const filled = kids.reduce((s, k) => s + k.w * k.h, 0);
+  const maxW = Math.max(0, ...kids.map((k) => k.w));
+  const leaves = kids.filter((k) => k.leaf).length;
+  let best: { s: Shelf; score: number } | null = null;
+  let bestMulti: { s: Shelf; score: number } | null = null;
+  let lastW = -1;
+  for (let i = 0; i < TRIES; i++) {
+    const target = Math.max(maxW, Math.sqrt(area * 0.4 * Math.pow(1.15, i)));
+    if (target === lastW) continue;
+    lastW = target;
+    const s = shelf(kids, target, gx, gy);
+    const boxW = s.w + 2 * BOX_PADDING;
+    const boxH = s.h + 2 * BOX_PADDING + (withHeader ? headerFor(boxW) : 0);
+    const fill = filled / Math.max(1, s.w * s.h);
+    const score = Math.abs(Math.log(boxW / boxH / TARGET_ASPECT)) + 0.8 * (1 - fill);
+    if (!best || score < best.score) best = { s, score };
+    if (s.cols >= 2 && (!bestMulti || score < bestMulti.score)) bestMulti = { s, score };
+  }
+  // a single column of four or more leaves reads badly (a tall strip of methods): prefer two or more
+  // columns when that is nearly as good
+  if (best && best.s.cols === 1 && leaves >= 4 && bestMulti && bestMulti.score <= best.score + 0.15) return bestMulti.s;
+  return best!.s;
+}
+
+function sortKids(item: Item): Item[] {
+  return [...item.children].sort((a, b) => {
+    if (!!a.leaf !== !!b.leaf) return a.leaf ? 1 : -1; // boxes before loose leaves
+    if (!a.leaf && !b.leaf) return b.h - a.h || b.w - a.w || (a.id < b.id ? -1 : 1); // tallest first
+    return a.leaf!.sortKey < b.leaf!.sortKey ? -1 : a.leaf!.sortKey > b.leaf!.sortKey ? 1 : 0;
+  });
+}
+
+function pack(item: Item): void {
+  if (item.leaf) {
+    item.w = item.leaf.w;
+    item.h = item.leaf.h;
+    return;
+  }
+  for (const c of item.children) pack(c);
+  const kids = sortKids(item);
+  const s = bestShelf(kids, GAP_X, GAP_Y, true);
+  kids.forEach((k, i) => {
+    k.x = s.place[i].x;
+    k.y = s.place[i].y;
+  });
+  item.children = kids;
+  item.w = s.w + 2 * BOX_PADDING;
+  item.header = headerFor(item.w);
+  item.h = s.h + 2 * BOX_PADDING + item.header;
+}
+
+/** Top-level blocks: same packing, with a gap that scales with the map so blocks read as separate when
+ *  zoomed all the way out. Centred on the origin. */
+function placeRoots(roots: Item[]): void {
   if (roots.length === 1) {
     roots[0].x = 0;
     roots[0].y = 0;
     return;
   }
-  // edges between descendants become weighted edges between their top-level items
-  const lifted = new Map<string, number>();
-  for (const [s, t] of edges) {
-    const a = rootOf.get(s), b = rootOf.get(t);
-    if (!a || !b || a === b) continue;
-    const k = a < b ? `${a}|${b}` : `${b}|${a}`;
-    lifted.set(k, (lifted.get(k) ?? 0) + 1);
-  }
-  if (lifted.size === 0 || roots.length <= ROOT_PACK_MAX) {
-    // few top-level blocks (or nothing connects them): a tidy grid, biggest first, with a gap that
-    // scales with the map so the blocks read as separate even when zoomed all the way out
-    const gap = Math.max(ROOT_GAP, 0.07 * Math.sqrt(roots.reduce((s, r) => s + r.w * r.h, 0)));
-    const box: Item = { id: "__root__", children: roots, w: 0, h: 0, x: 0, y: 0 };
-    pack(box, gap, gap, false);
-    for (const r of roots) {
-      r.x -= box.w / 2;
-      r.y -= box.h / 2;
-    }
-    return;
-  }
-  const cy = cytoscape({
-    headless: true,
-    styleEnabled: true,
-    style: [{ selector: "node", style: { width: "data(w)", height: "data(h)", shape: "rectangle" } }],
+  const gap = Math.max(ROOT_GAP, 0.07 * Math.sqrt(roots.reduce((s, r) => s + r.w * r.h, 0)));
+  const kids = sortKids({ id: "__root__", children: roots, w: 0, h: 0, x: 0, y: 0 });
+  const s = bestShelf(kids, gap, gap, false);
+  kids.forEach((k, i) => {
+    k.x = s.place[i].x - s.w / 2;
+    k.y = s.place[i].y - s.h / 2;
   });
-  cy.add([
-    ...roots.map((r) => ({ group: "nodes" as const, data: { id: r.id, w: r.w + ROOT_GAP, h: r.h + ROOT_GAP } })),
-    ...[...lifted.entries()].map(([k, w], i) => {
-      const [s, t] = k.split("|");
-      return { group: "edges" as const, data: { id: `l${i}`, source: s, target: t, w } };
-    }),
-  ]);
-  cy.layout({
-    name: "fcose",
-    animate: false,
-    randomize: true,
-    quality: "default",
-    uniformNodeDimensions: false,
-    packComponents: true,
-    nodeSeparation: ROOT_GAP,
-    nodeRepulsion: () => 6000,
-    idealEdgeLength: (e: { data: (k: string) => number }) => Math.max(40, 120 - 6 * e.data("w")),
-    edgeElasticity: () => 0.3,
-    gravity: 0.4,
-    numIter: 2500,
-    tile: true,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } as any).run();
-  const byId = new Map(roots.map((r) => [r.id, r]));
-  cy.nodes().forEach((n) => {
-    const r = byId.get(n.id())!;
-    r.x = n.position().x;
-    r.y = n.position().y;
-  });
-  cy.destroy();
-  separateRigid(roots);
-}
-
-/** Push apart top-level blocks that still overlap (each moves as a solid unit). */
-function separateRigid(items: Item[]): void {
-  for (let iter = 0; iter < 200; iter++) {
-    let moved = false;
-    for (let i = 0; i < items.length; i++) {
-      for (let j = i + 1; j < items.length; j++) {
-        const a = items[i], b = items[j];
-        const ox = (a.w + b.w) / 2 + ROOT_GAP / 2 - Math.abs(a.x - b.x);
-        const oy = (a.h + b.h) / 2 + ROOT_GAP / 2 - Math.abs(a.y - b.y);
-        if (ox <= 0 || oy <= 0) continue;
-        moved = true;
-        if (ox < oy) {
-          const s = (a.x <= b.x ? -1 : 1) * (ox / 2);
-          a.x += s;
-          b.x -= s;
-        } else {
-          const s = (a.y <= b.y ? -1 : 1) * (oy / 2);
-          a.y += s;
-          b.y -= s;
-        }
-      }
-    }
-    if (!moved) break;
-  }
 }
 
 /** Turn relative child centres into absolute rectangles for every leaf and box. */
 function emit(item: Item, cx: number, cy: number, out: Record<string, Rect>): void {
   if (item.leaf) {
-    // the footprint is a node slot plus a label slot underneath: centre the node in its slot
-    out[item.id] = { x: cx, y: cy - item.h / 2 + (item.h - LABEL_SLOT) / 2, w: item.w, h: item.h };
+    out[item.id] = { x: cx, y: cy, w: item.w, h: item.h }; // the chip is centred in its footprint
     return;
   }
   out[item.id] = { x: cx, y: cy, w: item.w, h: item.h, header: item.header };
@@ -221,14 +183,16 @@ function emit(item: Item, cx: number, cy: number, out: Record<string, Rect>): vo
   for (const c of item.children) emit(c, ox + c.x, oy + c.y, out);
 }
 
-export function runLayout(nodes: LayoutNode[], edges: [string, string][]): Record<string, Rect> {
+// `edges` is part of the request for future relationship-aware ordering; packing does not need it yet.
+export function runLayout(nodes: LayoutNode[], _edges: [string, string][]): Record<string, Rect> {
+  void _edges;
   const items = new Map<string, Item>();
   for (const n of nodes) items.set(n.id, { id: n.id, children: [], w: 0, h: 0, x: 0, y: 0 });
   const hasChildren = new Set<string>();
   for (const n of nodes) if (n.parent && items.has(n.parent)) hasChildren.add(n.parent);
   for (const n of nodes) {
     const it = items.get(n.id)!;
-    if (!hasChildren.has(n.id)) it.leaf = n;
+    if (!hasChildren.has(n.id)) it.leaf = n; // a box with no children left is drawn as a plain leaf
   }
   const roots: Item[] = [];
   for (const n of nodes) {
@@ -236,15 +200,8 @@ export function runLayout(nodes: LayoutNode[], edges: [string, string][]): Recor
     if (n.parent && items.has(n.parent)) items.get(n.parent)!.children.push(it);
     else roots.push(it);
   }
-  // a box with no children left (e.g. an empty folder) is drawn as a plain leaf
   for (const r of roots) pack(r);
-  const rootOf = new Map<string, string>();
-  const mark = (it: Item, root: string) => {
-    rootOf.set(it.id, root);
-    for (const c of it.children) mark(c, root);
-  };
-  for (const r of roots) mark(r, r.id);
-  placeRoot(roots, rootOf, edges);
+  placeRoots(roots);
   const out: Record<string, Rect> = {};
   for (const r of roots) emit(r, r.x, r.y, out);
   return out;

@@ -357,13 +357,14 @@ export const KIND_STYLE: Record<NodeKind, { color: string; label: string; shape:
   dependency: { color: "#d6cb99", label: "Package", shape: "round-tag" },
 };
 
-export const EDGE_STYLE: Record<EdgeKind, { color: string; style: "solid" | "dashed" | "dotted"; label: string }> = {
-  contains: { color: "#4a5265", style: "solid", label: "contains" },
-  imports: { color: "#8aa4c6", style: "solid", label: "imports" },
-  calls: { color: "#94c2a3", style: "solid", label: "calls" },
-  extends: { color: "#ad9fd0", style: "dashed", label: "extends" },
-  implements: { color: "#ad9fd0", style: "dotted", label: "implements" },
-  exposes: { color: "#d6b08f", style: "dashed", label: "exposes" },
-  queries: { color: "#d39ca9", style: "dashed", label: "queries" },
-  depends_on: { color: "#c8bf92", style: "dotted", label: "depends on" },
+/** Relationship styles. `dash` is the canvas line-dash pattern in px at width 1 (the map scales it). */
+export const EDGE_STYLE: Record<EdgeKind, { color: string; style: "solid" | "dashed" | "dotted"; dash: number[]; label: string }> = {
+  contains: { color: "#4a5265", style: "solid", dash: [], label: "contains" },
+  imports: { color: "#8aa4c6", style: "solid", dash: [], label: "imports" },
+  calls: { color: "#94c2a3", style: "solid", dash: [], label: "calls" },
+  extends: { color: "#ad9fd0", style: "dashed", dash: [6, 4], label: "extends" },
+  implements: { color: "#ad9fd0", style: "dotted", dash: [1.5, 3.5], label: "implements" },
+  exposes: { color: "#d6b08f", style: "dashed", dash: [2, 4], label: "exposes" },
+  queries: { color: "#d39ca9", style: "dashed", dash: [3, 3], label: "queries" },
+  depends_on: { color: "#c8bf92", style: "dotted", dash: [1.5, 5], label: "depends on" },
 };

@@ -1,37 +1,44 @@
 /**
- * Turns an API graph into a tidy, drawable view (decisions.md D-023).
+ * Turns an API graph into a tidy, drawable view (decisions.md D-023, D-027).
  *
  * - Nesting instead of lines: a node that `contains` another becomes its compound parent (folder box
  *   holding files, file box holding symbols). Those `contains` edges are then not drawn.
- * - External packages are gathered into one "External packages" box; the repo root node and its
- *   `depends_on` spokes are dropped (component → package `imports` edges already show real usage).
- * - Sizes come from a narrow range, and each node carries its layout footprint *including* its label,
- *   so the force layout spaces nodes by what is actually drawn.
+ * - External packages are gathered into one "Packages" box; the repo root node and its `depends_on`
+ *   spokes are dropped (component → package `imports` edges already show real usage).
+ * - Wrapper folders and single-file folders dissolve, loose symbol-less files gather into an "Other files"
+ *   box, and methods inside their class box drop the class prefix, so every level reads cleanly.
+ * - Each leaf carries its layout footprint: a chip (kind dot + monospace name) plus a little row gap.
  */
 import type { Graph, GraphNode } from "@/lib/api";
 
 export const PACKAGES_ID = "__packages__";
 export const SYNTHETIC_DIR_PREFIX = "__dir__:";
+export const OTHER_FILES_PREFIX = "__files__:";
 
 /** Ids that exist only in the drawing (not in the API graph). */
 export const isSynthetic = (id: string) => id.startsWith("__");
 const CONTAINER_KINDS = new Set(["directory", "file", "class"]);
 export const MAX_SIZE = 26; // largest drawn node
-export const LABEL_SLOT = 18; // room under a node for its label
+export const CHIP_H = 24; // drawn chip height (world units)
+const LEAF_H = 30; // chip + row gap; no separate label slot (the name is inside the chip)
 // order of leaves inside a box: entry points and data first, then code, then packages
 const KIND_ORDER: Record<string, number> = { endpoint: 0, table: 1, class: 2, function: 3, method: 4, file: 5, directory: 6, dependency: 7 };
 
 export interface ViewNode {
   id: string;
   label: string;
+  fullLabel: string; // e.g. "DebtAnalyzer._cycles" for a method shown as "_cycles"
   kind: string;
   parent?: string;
   size: number; // drawn diameter of a leaf
-  w: number; // layout footprint (node + label)
+  w: number; // layout footprint
   h: number;
   major: boolean; // labelled at overview zoom
   sortKey: string; // stable order inside a box
   path: string;
+  lines: number; // lines of code (0 when unknown)
+  isType?: boolean; // TypeScript interface (stored as a class by the extractor)
+  quiet?: boolean; // a file with no symbols and no relationships (e.g. an empty __init__.py)
   synthetic?: boolean;
 }
 
@@ -49,11 +56,6 @@ export interface ViewModel {
   edges: ViewEdge[];
 }
 
-function labelOf(n: GraphNode): string {
-  if (n.kind === "method" && typeof n.meta.class === "string") return `${n.meta.class}.${n.name}`;
-  return n.name;
-}
-
 export function buildView(g: Graph): ViewModel {
   const byId = new Map(g.nodes.filter((n) => n.kind !== "repo").map((n) => [n.id, n]));
 
@@ -65,7 +67,7 @@ export function buildView(g: Graph): ViewModel {
     if (!src || !byId.has(e.target) || !CONTAINER_KINDS.has(src.kind) || parentOf.has(e.target)) continue;
     parentOf.set(e.target, e.source);
   }
-  // guard against cycles (should not happen, but a cycle would hang the compound layout)
+  // guard against cycles (should not happen, but a cycle would hang the layout)
   for (const id of [...parentOf.keys()]) {
     const seen = new Set<string>([id]);
     let cur = parentOf.get(id);
@@ -85,8 +87,7 @@ export function buildView(g: Graph): ViewModel {
     const f = fileByPath.get(n.path);
     if (f && f !== n.id) parentOf.set(n.id, f);
   }
-  // Views without folder nodes (the Symbols level) get folders rebuilt from file paths, so symbols sit in
-  // files that sit in folders — the same hierarchy as the Files level.
+  // Views without folder nodes get folders rebuilt from file paths, so symbols sit in files that sit in folders.
   const hasDirs = [...byId.values()].some((n) => n.kind === "directory");
   if (!hasDirs && fileByPath.size > 1) {
     const ensureDir = (dir: string): string => {
@@ -104,10 +105,13 @@ export function buildView(g: Graph): ViewModel {
       parentOf.set(id, ensureDir(path.slice(0, path.lastIndexOf("/"))));
     }
   }
-  // Compact folders: a folder that holds only folders (no files of its own) is a wrapper. It dissolves and
-  // its sub-folders take its place, named with the path (`apps/api`, `apps/web`). A one-child chain
-  // collapses the same way (`api/archon` like VS Code), so the overview shows real components as peers.
+  // Compact folders:
+  // - a folder that holds only folders is a wrapper: it dissolves and its sub-folders take its place, named
+  //   with the path (`apps/api`, `apps/web`), so the overview shows real components as peers;
+  // - a folder that holds exactly one file dissolves into that file (`chat/ChatPanel.tsx`): one click less.
+  // Folders carry only `contains` edges, so no relationship is lost. Ids stay, so ?node= links still work.
   const labelOverride = new Map<string, string>();
+  const nameOf = (id: string) => labelOverride.get(id) ?? byId.get(id)!.name;
   for (let changed = true; changed; ) {
     changed = false;
     const kids = new Map<string, string[]>();
@@ -118,11 +122,12 @@ export function buildView(g: Graph): ViewModel {
     for (const [p, cs] of kids) {
       const pn = byId.get(p);
       if (!pn || pn.kind !== "directory" || !cs.length) continue;
-      if (!cs.every((c) => byId.get(c)?.kind === "directory")) continue;
+      const allDirs = cs.every((c) => byId.get(c)?.kind === "directory");
+      const singleFile = cs.length === 1 && byId.get(cs[0])?.kind === "file";
+      if (!allDirs && !singleFile) continue;
       const grand = parentOf.get(p);
       for (const c of cs) {
-        const cn = byId.get(c)!;
-        labelOverride.set(c, `${labelOverride.get(p) ?? pn.name}/${labelOverride.get(c) ?? cn.name}`);
+        labelOverride.set(c, `${nameOf(p)}/${nameOf(c)}`);
         if (grand) parentOf.set(c, grand);
         else parentOf.delete(c);
       }
@@ -157,7 +162,45 @@ export function buildView(g: Graph): ViewModel {
     }
   }
 
-  // 3. sizes + label footprints
+  // 3. loose symbol-less files (configs, __init__.py) next to sub-folders gather into one "Other files" box,
+  //    instead of floating as specks between big tiles. Only where there are at least two of them.
+  const childCount = new Map<string, number>();
+  for (const p of parentOf.values()) childCount.set(p, (childCount.get(p) ?? 0) + 1);
+  const hasSubBox = new Set<string>(); // parents (or "" for the root) that hold at least one box
+  for (const [c, p] of parentOf) if (childCount.has(c)) hasSubBox.add(p);
+  for (const n of byId.values()) if (!parentOf.has(n.id) && childCount.has(n.id)) hasSubBox.add("");
+  const looseByParent = new Map<string, string[]>();
+  for (const n of byId.values()) {
+    if (n.kind !== "file" || childCount.has(n.id)) continue;
+    const p = parentOf.get(n.id) ?? "";
+    if (!hasSubBox.has(p)) continue;
+    if (!looseByParent.has(p)) looseByParent.set(p, []);
+    looseByParent.get(p)!.push(n.id);
+  }
+  const otherBoxes: ViewNode[] = [];
+  for (const [p, ids] of looseByParent) {
+    if (ids.length < 2) continue;
+    const id = OTHER_FILES_PREFIX + (p || "root");
+    for (const c of ids) parentOf.set(c, id);
+    if (p) parentOf.set(id, p);
+    otherBoxes.push({
+      id,
+      label: p ? `Other files (${ids.length})` : `Root files (${ids.length})`,
+      fullLabel: p ? "Other files" : "Root files",
+      kind: "files",
+      parent: p || undefined,
+      size: 0,
+      w: 0,
+      h: 0,
+      major: false,
+      sortKey: "y",
+      path: p ? (byId.get(p)?.path ?? "") : "",
+      lines: 0,
+      synthetic: true,
+    });
+  }
+
+  // 4. sizes + footprints
   const degree = new Map<string, number>();
   for (const e of edges) {
     degree.set(e.source, (degree.get(e.source) ?? 0) + e.weight);
@@ -167,28 +210,43 @@ export function buildView(g: Graph): ViewModel {
   const hubCut = degrees[Math.min(degrees.length - 1, Math.max(4, Math.floor(degrees.length * 0.12)))] ?? Infinity;
   const isParent = new Set(parentOf.values());
 
+  const labelOf = (n: GraphNode): { label: string; full: string } => {
+    if (n.kind === "method" && typeof n.meta.class === "string") {
+      const full = `${n.meta.class}.${n.name}`;
+      // inside its class box the class name is already the box title
+      const parent = byId.get(parentOf.get(n.id) ?? "");
+      return { label: parent?.kind === "class" ? n.name : full, full };
+    }
+    const label = labelOverride.get(n.id) ?? n.name;
+    return { label, full: label };
+  };
+
   const nodes: ViewNode[] = [...byId.values()].map((n) => {
     const d = degree.get(n.id) ?? 0;
     const size = Math.round(12 + (MAX_SIZE - 12) * Math.sqrt(Math.min(d, 40) / 40));
-    const label = labelOverride.get(n.id) ?? labelOf(n);
+    const { label, full } = labelOf(n);
     const chars = Math.min(label.length, 24);
     return {
       id: n.id,
       label,
+      fullLabel: full,
       kind: n.kind,
       parent: parentOf.get(n.id),
       size,
       w: Math.max(size, chars * 6.7 + 34), // room for the chip: kind dot + monospace name
-      h: MAX_SIZE + LABEL_SLOT, // same slot height for every node so rows line up
+      h: LEAF_H,
       major: isParent.has(n.id) || n.kind === "endpoint" || n.kind === "table" || (d > 0 && d >= hubCut),
       sortKey: `${KIND_ORDER[n.kind] ?? 9}${label.toLowerCase()}`,
       path: n.path,
+      lines: n.end_line > 0 ? n.end_line - Math.max(1, n.start_line) + 1 : 0,
+      isType: n.meta.interface === true || undefined,
+      quiet: (n.kind === "file" && !isParent.has(n.id) && d === 0) || undefined,
       synthetic: n.meta.synthetic === true || undefined,
     };
   });
+  nodes.push(...otherBoxes);
   if ([...byId.values()].some((n) => n.kind === "dependency")) {
-    const count = nodes.filter((n) => n.parent === PACKAGES_ID).length;
-    nodes.push({ id: PACKAGES_ID, label: `Packages (${count})`, kind: "group", size: 0, w: 0, h: 0, major: true, sortKey: "z", path: "", synthetic: true });
+    nodes.push({ id: PACKAGES_ID, label: "Packages", fullLabel: "Packages", kind: "group", size: 0, w: 0, h: 0, major: true, sortKey: "z", path: "", lines: 0, synthetic: true });
   }
   return { nodes, edges };
 }

@@ -87,3 +87,19 @@ def test_search_and_metrics(fixture_repo: Path):
     m = rg.metrics()
     assert m["files"] >= 8 and m["endpoints"] == 4 and m["tables"] == 2
     assert m["most_imported"][0]["path"] == "app/models.py"
+
+
+def test_ts_path_aliases_resolve_inside_a_monorepo_app():
+    """`@/lib/api` in apps/web/src/... means apps/web/src/lib/api.ts, not <repo>/src/lib/api."""
+    from archon.graph.builder import GraphBuilder
+    from archon.graph.model import Node
+
+    b = GraphBuilder.__new__(GraphBuilder)
+    b._file_by_path = {}
+    for p in ("apps/web/src/lib/api.ts", "apps/web/src/components/ui.tsx", "src/root.ts"):
+        b._file_by_path[p] = Node.create(NodeKind.FILE, name=p.rsplit("/", 1)[-1], path=p, qualified_name=p)
+    page = "apps/web/src/app/repos/page.tsx"
+    assert b._resolve_js(page, "@/lib/api").path == "apps/web/src/lib/api.ts"
+    assert b._resolve_js(page, "~/components/ui").path == "apps/web/src/components/ui.tsx"
+    assert b._resolve_js(page, "@/root").path == "src/root.ts"  # falls back to the repo root
+    assert b._resolve_js(page, "@/missing") is None

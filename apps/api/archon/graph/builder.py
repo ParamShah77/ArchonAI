@@ -189,8 +189,18 @@ class GraphBuilder:
         elif module.startswith(("@/", "~/", "src/")):
             base = module.split("/", 1)[1] if module.startswith(("@/", "~/")) else module
             base = posixpath.normpath(base)
-            hit = self._js_candidates(base) or self._js_candidates("src/" + base)
-            return hit
+            # Path aliases are relative to the app that owns the importing file, which in a monorepo is not
+            # the repo root (apps/web/src/lib/api.ts for "@/lib/api"). Try each folder above the importer,
+            # nearest first: <dir>/<base> and <dir>/src/<base>.
+            d = posixpath.dirname(from_path)
+            while True:
+                for root in (posixpath.join(d, base), posixpath.join(d, "src", base)):
+                    hit = self._js_candidates(posixpath.normpath(root))
+                    if hit is not None:
+                        return hit
+                if not d:
+                    return None
+                d = posixpath.dirname(d)
         else:
             return None
         return self._js_candidates(base)

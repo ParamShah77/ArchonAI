@@ -9,11 +9,9 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@types/cytoscape": "^3.21.9",
     "clsx": "^2.1.1",
-    "cytoscape": "^3.34.3",
-    "cytoscape-fcose": "^2.2.0",
     "d3-ease": "^3.0.1",
+    "d3-interpolate": "^3.0.1",
     "d3-selection": "^3.0.0",
     "d3-transition": "^3.0.1",
     "d3-zoom": "^3.0.0",
@@ -27,6 +25,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/d3-ease": "^3.0.2",
+    "@types/d3-interpolate": "^3.0.4",
     "@types/d3-selection": "^3.0.12",
     "@types/d3-transition": "^3.0.9",
     "@types/d3-zoom": "^3.0.9",

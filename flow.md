@@ -78,21 +78,28 @@ apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /
   /repos/[id]                          layout.tsx awaits params -> <RepoShell id>
                                          RepoShell: GET /repos/{id} (polls while not ready), provides RepoContext, tabs
                                          page.tsx -> <RepoOverview/>: stats from repo row, GET /repos/{id}/architecture
-  /repos/[id]/map                      page.tsx -> <GraphExplorer/>  (semantic zoom, D-024; renderer D-026)
+  /repos/[id]/map                      page.tsx -> <GraphExplorer/>  (semantic zoom D-024; renderer D-026, D-027)
                                          GET /repos/{id}/graph?level=all  (whole hierarchy, once)
-                                         -> <MapCanvas/>: viewModel.buildView() (nesting, wrapper folders
-                                            dissolved, packages box) -> worker layoutCore.runLayout() (rows; up to
-                                            12 top-level blocks packed, more placed by fCoSE) -> rectangles
-                                            -> mapModel.buildMapModel() (tree, ancestors, component hues, summaries)
-                                         d3-zoom (wheel / pinch / drag) -> target transform -> requestDraw()
-                                         draw() each animation frame while moving: ease view toward target ->
-                                            walk boxes from the roots: openness t from on-screen size (gated past
-                                            home zoom), children visible by t -> frames -> merged relationships
-                                            (edges spread over visible stand-ins) -> tiles -> symbol chips -> pills
-                                            -> hover/selection glow -> breadcrumb (deepest open box at centre)
-                                         click -> pick() -> select -> <NodePanel/> GET /repos/{id}/nodes/{node_id}
-                                         dblclick / breadcrumb / search -> zoomTo(id) -> d3 transition (fly)
-                                         ?node=, ?focus= -> zoomTo; ?prefix= -> zoomToPath (all boxes under it)
+                                         -> <MapCanvas/>: viewModel.buildView() (nesting; wrapper and single-file
+                                            folders dissolved; "Other files" groups; packages box; short method
+                                            names) -> worker layoutCore.runLayout() (rows per box, row width chosen
+                                            for screen shape; top-level blocks packed the same way) -> rectangles
+                                            -> mapModel.buildMapModel() (tree, areas, hues by name, ranked summaries,
+                                            dominant root) -> onKey() -> <MapLegend/>; place() -> goHome()
+                                         d3-zoom (wheel / pinch / drag) -> target transform (+ cursor anchor) ->
+                                            requestDraw()
+                                         draw() -> renderFrame() each animation frame while moving or settling:
+                                            time-based glide toward target about the anchor -> walk boxes from the
+                                            roots: openness follows size while scaling, settles to 0/1 at rest
+                                            (hysteresis) -> frame fills -> resting lines -> box bodies + borders ->
+                                            symbol chips -> focused lines (on top) -> label queue (titles, names,
+                                            collision-checked pills) -> rings -> breadcrumb -> hover re-pick
+                                         click -> pick() -> ring now, onSelect after 220 ms -> <NodePanel/>
+                                            GET /repos/{id}/nodes/{node_id}; ?node= via history.replaceState
+                                         dblclick tile / breadcrumb / search -> zoomTo(id) -> fly() (d3 transition
+                                            from the drawn view, duration from path length); dblclick empty -> zoomOut()
+                                         ?node=, ?focus= -> zoomTo; ?prefix= -> zoomToPath (all boxes under it);
+                                            ?debug=map -> frame-time / settle overlay
 ```
 Data hook: `src/lib/hooks.ts::useApi(key, fetcher, {pollMs, pollWhile})` — refetches when `key` changes;
 `loading` is true only until the first result for the current key arrives.
@@ -202,6 +209,29 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-11 — Code Map design review: step 0 + batch 1
+- Ran an 8-lens design review with adversarial verification of the map (85/90 proposals survived). Plan and critic notes saved to `docs/code-map-plan.md`. The owner said "continue with plan": step 0 + batch 1 implemented (decisions D-027, D-028).
+- Backend: `archon/graph/builder.py::_resolve_js` resolves `@/` and `~/` from the importing app's folder upwards (monorepos); test `test_ts_path_aliases_resolve_inside_a_monorepo_app`. Re-indexed ArchonAI: apps/web file-to-file imports 0 -> 69, and the stale map (GraphCanvas.tsx) was replaced by current code.
+- `apps/web/src/components/graph/MapCanvas.tsx` rewritten:
+  - camera: time-based glide about the cursor, new `wheelDelta`, `fly()` from the drawn view with a path-length duration, reduced motion, grabbing cursor;
+  - level of detail: settle at rest with hysteresis (`anim` state), one-card opening (`drawFrameFill`, `drawBox`, `da` alpha);
+  - lines: `drawEdges` uses neutral ink, rare-kind dashes, quiet package threads, lens curves and focused lines on top;
+  - labels: label queue (`queueTileName`, `queueFrameTitle`, `drawLabels` with pill collisions), dot-to-chip cross-fade in `drawChip`;
+  - interaction: `drawRing` (accent selection ring, light hover ring), `refreshHover`, deferred click / double-click fly / double-click empty `zoomOut`, tooltip for shortened names;
+  - robustness: `contextrestored` / `visibilitychange` redraws, error-chip self-clear, fade-in, `?debug=map` overlay, `insetBottom` so fits stay above the key.
+- New `mapText.ts`: `measure`, `fit`, `fitSmart` (extension-keeping middle ellipsis, `…/file`), `fitParts`.
+- `mapModel.ts`: `MapEdge.external`, area/neutral/files/isType/quiet/lines fields, hues by area name, ranked `summarize()`, `dominant` root.
+- `viewModel.ts`: short method labels plus `fullLabel`, single-file folder merge, "Other files"/"Root files" groups, `isType`, `quiet`, `lines`, 30-unit leaf footprint, "Packages" label.
+- `layoutCore.ts`: `shelf()` + `bestShelf()` aspect search, `placeRoots()` packing; fCoSE, `separateRigid` and the `cytoscape`, `cytoscape-fcose` and `@types/cytoscape` dependencies removed (`src/types/cytoscape-fcose.d.ts` deleted). Added `d3-interpolate`.
+- `GraphExplorer.tsx`: `MapLegend` from the model (areas, symbols, line samples; collapsible; reports its height), "Fit all", repo-root crumb, `history.replaceState` URL sync, map background before the first frame. `lib/api.ts`: `EDGE_STYLE.dash`. `next.config.ts`: `devIndicators: false`.
+- `apps/web/src/app/globals.css`: restored `--color-danger` (an uncommitted edit had removed it, which broke the red error styling). Left uncommitted together with that edit's font change, for the owner to confirm.
+- Verified at 1362×928 (simulated visible tab, canvas snapshots):
+  - views: overview, archon, services, reasoning.py, DebtAnalyzer, web/components, packages, selection, hover, and the portfolio repo with its dominant `src`;
+  - settling: 0 half-open boxes 1 s after each of 5 wheel pauses; frames p50 4.7 ms, p95 9.5 ms;
+  - clicks: a click shows the ring at once with the URL 220 ms later; a double-click flies without selecting; a double-click on empty space steps out; the tooltip shows shortened names;
+  - the overview sits above the key;
+  - lint, type-check, build and 36 backend tests pass.
 
 ### Session 2026-10-10 — Code Map: never stay blank
 - Owner saw an empty Code Map (toolbar shown, no map) in their browser; it rendered correctly in a clean browser at the same size, so the renderer was hardened against the plausible causes.
