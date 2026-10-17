@@ -485,3 +485,49 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
   - The Health colours depend on a recent analysis run (re-indexing clears findings until the next run).
   - The layout cache key bumped to v5.
   - Moving the map to the right of the screen when a node is selected under the panel remains handled by `ensureVisible`.
+
+## D-032 — Graph view: a Neo4j-style node-link graph beside the Map, with detail that grows as you zoom
+- **Date:** 2026-10-17
+- **Status:** Accepted. Adds a second view to the Code Map page; the nested-box Map of D-024 to D-031 stays the default.
+- **Context:** The owner shared Neo4j Browser screenshots and asked for "this code map". The screenshots show coloured circles per kind, labelled relationship lines with arrows, star clusters, and an overview of labels and relationship types with counts. The owner also asked that "as we zoom in the zoomed part becomes clearer and clearer".
+- **Decision:**
+  - **Toggle:** a Map | Graph toggle in the Code Map toolbar. The choice is remembered in localStorage and read through `useSyncExternalStore`, so the server render and hydration agree.
+  - **Data** (`forceData.ts`):
+    - Every node except the repo is a circle coloured by kind (a Neo4j-like palette).
+    - Radius is 8–13 by kind plus 1.6·√degree, capped at 26.
+    - Every relationship is a line, including `contains`. So a file and its symbols form a star, and folders hold the stars together.
+  - **Physics** (d3-force, shared by the worker and the main thread through `makeSimulation`):
+    - `contains` links are short and strong.
+    - Calls are very weak (0.004) and other relationships weak (0.012). Otherwise the 1,000+ calls knot everything into one even ball.
+    - Charge depends on kind: folders −420, files −260, classes −60, symbols −20. Stars stay tight and spread apart.
+    - Collision radius is r + 4, with weak centring.
+    - Start positions are seeded next to the container, so the same repository settles into the same picture.
+  - **Settling in a Web Worker** (`force.worker.ts`):
+    - About 200 ticks of a 1,100-node graph cost about 1.5 s of CPU (7 ms per tick measured).
+    - The worker ticks in 33 ms slices and streams positions back. The page keeps panning and zooming smoothly, and the camera auto-fits until you touch it.
+    - Dragging stops the worker; the live main-thread simulation finishes the settling around your hand.
+    - Dropped nodes stay pinned; a double-click releases them.
+  - **Detail by zoom** (screen sizes, smooth fades):
+    - Tiny circles become 2 px dots.
+    - Lines fade with length, so lines between far clusters stay quiet.
+    - Hub names (top 6% by degree) appear beside their circles from k ≈ 0.12, and every name from k ≈ 0.55. Collision checks keep them from overlapping.
+    - A name moves inside its circle once the circle can hold it whole; it shrinks to 9 px before it is ever shortened. The name beside fades out before the inside one fades in, so there is never a double.
+    - Arrows appear from k ≈ 0.35.
+    - Relationship types appear along lines from k ≈ 1.2, only on lines shorter than 420 px. They read upright, cut the line, and have collision checks.
+    - Selection (or hover) keeps the node, its neighbours and their lines bright, with types shown on those lines from k ≈ 0.5. Everything else dims.
+  - **Overview panel** (`GraphOverview.tsx`):
+    - Node-label chips and relationship-type chips, each with counts. Click a chip to hide or show it; `*` shows all.
+    - "Displaying N nodes, M relationships".
+    - Filtering keeps the current positions and nudges the layout.
+  - The Graph view implements `MapController`, so Fit all, search (fly and preview ring), the zoom controls and the details panel work unchanged.
+- **Alternatives considered:**
+  - **Replacing the Map:** the nested map answers "where is it" and "what is inside" at a glance; the graph answers "how is it connected". Both stay, one toggle apart.
+  - **A graph library** (Cytoscape, sigma.js, react-force-graph): heavier, and harder to style to the app's look and to drive with the existing camera and controller. d3-force is about 15 kB, and the renderer reuses the map's text and palette helpers.
+  - **WebGL:** Canvas2D draws 1,100 nodes and 2,500 lines well within a frame here. WebGL would add a dependency and lose crisp canvas text.
+  - **Ticking on the main thread only:** settling was tied to the frame rate (a throttled tab took minutes) and cost about 7 ms per frame.
+  - **Hiding calls by default:** a simpler picture, but it hides the most useful relationship. Weak call forces give the same calm layout with all lines shown.
+- **Why this one:** it matches the reference closely (circles, colours, stars, typed arrows, an overview with counts) while keeping ARCHON's dark, soft look. It delivers "clearer and clearer" with a fixed order of detail driven by on-screen size.
+- **Consequences:**
+  - New dependencies `d3-force` and `@types/d3-force`.
+  - Positions are cached in memory per repository version, not across reloads. A reload settles again in about 1–2 s, deterministically.
+  - Very large repositories (10k+ nodes) would need sampling or clustering before the graph stays readable. The current repositories do not need it.

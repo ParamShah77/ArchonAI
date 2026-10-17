@@ -1,14 +1,17 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, ChevronUp, HeartPulse, Layers, Maximize2, Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { ChevronDown, ChevronRight, ChevronUp, HeartPulse, Layers, Maximize2, Network, Search, SquareDashed } from "lucide-react";
 import { api, EDGE_STYLE, KIND_STYLE } from "@/lib/api";
 import type { Graph, GraphNode } from "@/lib/api";
 import { useApi, useDebounced } from "@/lib/hooks";
 import { useRepo } from "@/components/RepoShell";
 import { MapCanvas, type Crumb, type MapController, type MapKey, type NodeAction } from "@/components/graph/MapCanvas";
 import { MapControls } from "@/components/graph/MapControls";
+import { ForceGraph } from "@/components/graph/ForceGraph";
+import { buildGraphData } from "@/components/graph/forceData";
+import { GraphOverview } from "@/components/graph/GraphOverview";
 import { HEALTH_LABELS, HEALTH_TILES, MAP_BG } from "@/components/graph/palette";
 import { runAction } from "@/components/graph/nodeActions";
 import { NodePanel } from "@/components/graph/NodePanel";
@@ -16,6 +19,30 @@ import { ErrorBox, KindBadge, Spinner } from "@/components/ui";
 
 const KEY_OPEN = "archon.map.key.open";
 const PANEL_W = 380; // details panel width (it slides over the map)
+const OVERVIEW_W = 280; // the Graph view's overview panel
+const KEY_VIEW = "archon.map.view";
+
+// Map (nested boxes) or Graph (node-link) view, remembered in localStorage; the server renders "map"
+const viewListeners = new Set<() => void>();
+function readView(): "map" | "graph" {
+  try {
+    return window.localStorage.getItem(KEY_VIEW) === "graph" ? "graph" : "map";
+  } catch {
+    return "map";
+  }
+}
+function writeView(v: "map" | "graph") {
+  try {
+    window.localStorage.setItem(KEY_VIEW, v);
+  } catch {
+    /* ignore */
+  }
+  viewListeners.forEach((f) => f());
+}
+const subscribeView = (f: () => void) => {
+  viewListeners.add(f);
+  return () => viewListeners.delete(f);
+};
 
 // The whole-hierarchy graph, kept while you visit other tabs of the same repository (the camera is
 // remembered by the map itself), so coming back to the Code Map is instant and keeps your place.
@@ -31,6 +58,9 @@ export function GraphExplorer() {
   const router = useRouter();
   const sp = useSearchParams();
   const [lens, setLens] = useState<"structure" | "health">("structure");
+  const view = useSyncExternalStore(subscribeView, readView, () => "map" as const);
+  const [hiddenKinds, setHiddenKinds] = useState<Set<string>>(() => new Set());
+  const [hiddenRels, setHiddenRels] = useState<Set<string>>(() => new Set());
   const [selected, setSelected] = useState<string | null>(sp.get("node") ?? sp.get("focus"));
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
   const [mapKey, setMapKey] = useState<MapKey | null>(null);
@@ -68,6 +98,15 @@ export function GraphExplorer() {
   const findings = useApi(lens === "health" ? `map-findings:${repo.id}:${repo.updated_at}` : null, () =>
     api.analysis.findings(repo.id, { status: "open", limit: 2000 }),
   );
+  const gdata = useMemo(() => (graph && view === "graph" ? buildGraphData(graph, hiddenKinds, hiddenRels) : null), [graph, view, hiddenKinds, hiddenRels]);
+  const toggleIn = (set: Set<string>, k: string | null) => {
+    if (k === null) return new Set<string>();
+    const next = new Set(set);
+    if (next.has(k)) next.delete(k);
+    else next.add(k);
+    return next;
+  };
+  const sideW = panelOpen ? PANEL_W : view === "graph" ? OVERVIEW_W : 0;
   const search = useApi(dq.length >= 2 ? `search:${repo.id}:${dq}` : null, () => api.graph.search(repo.id, dq));
 
   const toggleKey = () => {
@@ -181,8 +220,26 @@ export function GraphExplorer() {
             ))}
           </nav>
 
-          {/* lens: the calm structure view, or a soft heat map of open findings per 1,000 lines */}
+          {/* view: nested boxes (Map) or a node-link graph (Graph) */}
           <div className="ml-auto flex items-center rounded-md border border-line-strong overflow-hidden text-xs shrink-0">
+            <button
+              className={`px-2.5 py-1.5 flex items-center gap-1.5 ${view === "map" ? "bg-elev2 text-fg" : "text-muted hover:text-fg"}`}
+              onClick={() => writeView("map")}
+              title="Folders and files as nested boxes"
+            >
+              <SquareDashed size={13} /> Map
+            </button>
+            <button
+              className={`px-2.5 py-1.5 flex items-center gap-1.5 border-l border-line-strong ${view === "graph" ? "bg-elev2 text-fg" : "text-muted hover:text-fg"}`}
+              onClick={() => writeView("graph")}
+              title="Every node and relationship as a force-directed graph"
+            >
+              <Network size={13} /> Graph
+            </button>
+          </div>
+
+          {/* lens: the calm structure view, or a soft heat map of open findings per 1,000 lines */}
+          {view === "map" && <div className="flex items-center rounded-md border border-line-strong overflow-hidden text-xs shrink-0">
             <button
               className={`px-2.5 py-1.5 flex items-center gap-1.5 ${lens === "structure" ? "bg-elev2 text-fg" : "text-muted hover:text-fg"}`}
               onClick={() => setLens("structure")}
@@ -197,7 +254,7 @@ export function GraphExplorer() {
             >
               <HeartPulse size={13} /> Health
             </button>
-          </div>
+          </div>}
 
           <div className="relative w-72 shrink-0">
             <Search size={14} className="absolute left-2.5 top-2.5 text-faint" />
@@ -243,7 +300,30 @@ export function GraphExplorer() {
           {loading && !graph && (
             <div className="absolute top-3 left-3 z-10 chip"><Spinner className="h-3 w-3" /> loading map</div>
           )}
-          {graph && (
+          {gdata && graph && (
+            <>
+              <ForceGraph
+                key="graph"
+                data={gdata}
+                cacheKey={`${repo.id}:${repo.updated_at}`}
+                selected={selected}
+                onSelect={setSelected}
+                onReady={onReady}
+                insetRight={sideW}
+              />
+              <GraphOverview
+                kindCounts={gdata.kindCounts}
+                relCounts={gdata.relCounts}
+                hiddenKinds={hiddenKinds}
+                hiddenRels={hiddenRels}
+                onToggleKind={(k) => setHiddenKinds((s) => toggleIn(s, k))}
+                onToggleRel={(k) => setHiddenRels((s) => toggleIn(s, k))}
+                shown={{ nodes: gdata.nodes.length, links: gdata.links.length }}
+                width={OVERVIEW_W}
+              />
+            </>
+          )}
+          {graph && view === "map" && (
             <MapCanvas
               graph={graph}
               selected={selected}
@@ -260,7 +340,7 @@ export function GraphExplorer() {
             />
           )}
 
-          {mapKey && (
+          {mapKey && view === "map" && (
             <MapLegend
               mapKey={mapKey}
               open={keyOpen}
@@ -269,7 +349,7 @@ export function GraphExplorer() {
               health={lens === "health" ? { loading: findings.loading && !findings.data, count: findings.data?.findings.length ?? 0 } : null}
             />
           )}
-          {graph && <MapControls ctrl={mapCtrl} right={panelOpen ? PANEL_W : 0} />}
+          {graph && <MapControls ctrl={mapCtrl} right={sideW} />}
 
           {/* the details panel slides over the map: the map keeps its size, so nothing opens or jumps */}
           {panelId && (

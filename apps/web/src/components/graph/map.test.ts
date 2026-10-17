@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Graph, GraphEdge, GraphNode } from "@/lib/api";
 import { runLayout, type LayoutEdge } from "./layoutCore";
+import { buildGraphData, makeSimulation, seedPositions } from "./forceData";
 import { buildMapModel } from "./mapModel";
 import { fitParts, fitSmart, type FontSpec } from "./mapText";
 import { boxPalette, chipPalette, contrast, HEALTH_TILES, MAP_INK, MAP_MUTED, mixOklab } from "./palette";
@@ -193,5 +194,37 @@ describe("text fitting", () => {
 
   it("drops whole summary parts instead of cutting words", () => {
     expect(fitParts(ctx, ["10 endpoints", "12 functions"], f, 90)).toBe("10 endpoints");
+  });
+});
+
+describe("graph view data", () => {
+  it("counts every kind and relationship, and drops hidden ones with their lines", () => {
+    const { g, ids } = sampleRepo();
+    const all = buildGraphData(g, new Set(), new Set());
+    expect(all.kindCounts.get("function")).toBe(6);
+    expect(all.relCounts.get("calls")).toBe(3);
+    expect(all.nodes.find((n) => n.id === ids.m1.id)!.full).toBe("Order.total");
+    expect(all.nodes.find((n) => n.id === ids.m1.id)!.parent).toBe(ids.cls.id);
+    const noFns = buildGraphData(g, new Set(["function"]), new Set(["imports"]));
+    expect(noFns.nodes.some((n) => n.kind === "function")).toBe(false);
+    expect(noFns.links.some((l) => l.kind === "calls" || l.kind === "imports")).toBe(false);
+    // the counts in the overview stay those of the whole repository
+    expect(noFns.kindCounts.get("function")).toBe(6);
+  });
+
+  it("settles into the same picture every time, with each symbol next to its file", () => {
+    const { g, ids } = sampleRepo();
+    const run = () => {
+      const d = buildGraphData(g, new Set(), new Set());
+      seedPositions(d.nodes);
+      const sim = makeSimulation(d.nodes, d.links).alpha(1);
+      for (let i = 0; i < 300; i++) sim.tick();
+      return new Map(d.nodes.map((n) => [n.id, n]));
+    };
+    const a = run(), b = run();
+    for (const [id, n] of a) expect(n.x).toBeCloseTo(b.get(id)!.x!, 6);
+    const dist = (p: string, q: string) => Math.hypot(a.get(p)!.x! - a.get(q)!.x!, a.get(p)!.y! - a.get(q)!.y!);
+    // a file's own function sits closer to it than the other file does
+    expect(dist(ids.f.id, ids.entry.id)).toBeLessThan(dist(ids.f.id, ids.h.id));
   });
 });

@@ -105,6 +105,20 @@ apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /
                                             copy path, VS Code / GitHub
                                          zoom end / landed flight -> saveCamera() (sessionStorage per repo)
                                          ?node=, ?focus= -> zoomTo; ?prefix= -> zoomToPath; ?debug=map overlay
+                                         toolbar Map | Graph (localStorage archon.map.view, read with useSyncExternalStore;
+                                            the server renders Map). Graph view (D-032):
+                                            forceData.buildGraphData(graph, hiddenKinds, hiddenRels) -> nodes (circles
+                                            sized by degree), links (contains + every relationship), counts ->
+                                            <ForceGraph/>: seedPositions (next to the container, seeded random) ->
+                                            force.worker.ts (makeSimulation; ticks ~33 ms at a time, streams x/y back)
+                                            -> positions copied, auto-fit while settling -> draw(): grid -> lines
+                                            (length fade, arrows from k 0.35, type labels from k 1.2 with collision)
+                                            -> circles (dots when tiny; focus ring) -> names beside (hubs first, then
+                                            all) -> names inside once the circle holds them whole
+                                            drag -> worker stopped, live simulation (alphaTarget) -> node pinned;
+                                            click -> onSelect (panel); dblclick -> zoomTo / release pin
+                                            <GraphOverview/>: kind and relationship chips toggle the hidden sets ->
+                                            new data -> same positions kept, nudged (alpha 0.3)
 ```
 Data hook: `src/lib/hooks.ts::useApi(key, fetcher, {pollMs, pollWhile})` — refetches when `key` changes;
 `loading` is true only until the first result for the current key arrives.
@@ -214,6 +228,30 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-17 — Graph view: Neo4j-style node-link graph (decision D-032)
+- New `forceData.ts`:
+  - `buildGraphData`: nodes, links, counts, radius by degree, parent;
+  - `makeSimulation`: the shared physics (tight "contains" stars, gentle calls and imports, charge by kind);
+  - `seedPositions`, `seededRandom`, colours and labels.
+- New `force.worker.ts`: settles the layout off the main thread and streams positions back.
+- New `ForceGraph.tsx`:
+  - Canvas2D with a d3-zoom glide;
+  - zoom-dependent detail: dots, hub names, every name, names inside circles, arrows, line types;
+  - hover tooltip, selection highlight, drag to pin, double-click to fly;
+  - implements `MapController` for the toolbar, search and controls;
+  - positions remembered per repository version.
+- New `GraphOverview.tsx`: node-label and relationship-type chips with counts (click to hide or show), plus "Displaying N nodes, M relationships".
+- `GraphExplorer.tsx`:
+  - Map | Graph toggle (`readView` / `writeView` through `useSyncExternalStore`);
+  - graph data memo, overview panel, side inset for the controls;
+  - the lens toggle and the key show only in the Map view.
+- `package.json`: `d3-force`, `@types/d3-force`.
+- Tests: `map.test.ts` covers graph data counts and filters, and a deterministic settle (14 tests).
+- Verified at 1362x928:
+  - on ArchonAI (1,109 nodes, 2,547 relationships) and ChromaGen (165 nodes);
+  - checked: fit, k 1.1, k 2.6, selection with the panel, hiding Functions, drag;
+  - the Map view is unchanged; lint, build and tests pass.
 
 ### Session 2026-10-12 (later) — Code Map tier 3 (decision D-031)
 - `MapCanvas.tsx`:
