@@ -531,3 +531,45 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
   - New dependencies `d3-force` and `@types/d3-force`.
   - Positions are cached in memory per repository version, not across reloads. A reload settles again in about 1–2 s, deterministically.
   - Very large repositories (10k+ nodes) would need sampling or clustering before the graph stays readable. The current repositories do not need it.
+
+## D-033 — Homepage: one entry per repository, cards with a summary, most recently used first
+- **Date:** 2026-10-18
+- **Status:** Accepted
+- **Context:** The owner asked for a more refined homepage. Two problems stood out:
+  - The repository list was a plain list that did not use what ARCHON already knows.
+  - Adding the same folder twice had created two "ArchonAI" entries. The chats and docs were on one entry, and the fresh graph and findings on the other.
+- **Decision:**
+  - **One entry per repository:**
+    - `POST /repos` compares `source_key(source)`. Git URLs are normalised: `.git` and trailing slashes dropped, lower case, scp form and user@ removed. Local paths are resolved and case-folded on Windows.
+    - A match returns the existing entry and re-analyzes it (unless it is already running), instead of creating a duplicate. The page says "already here, refreshing it".
+    - Names of local folders are taken from the last path part with either separator.
+  - **List summary:** `GET /repos` adds `summary` to each repository:
+    - latest health score and grade;
+    - open findings by severity;
+    - last finished analysis run;
+    - number of conversations;
+    - last activity, the latest of the update, the analysis run and the newest conversation.
+    - These come from stored rows in four grouped queries; nothing is computed or analyzed. The list is sorted by last activity.
+  - **Page:**
+    - A one-line explanation of ARCHON, then the add box. The box shows a git or folder icon depending on what you type.
+    - Repository cards in two columns. Each card shows:
+      - the source in short form (`github.com/org/repo`, `~\Desktop\x`);
+      - a language bar in GitHub's language colours, plus frameworks;
+      - files, lines and symbols;
+      - the health grade (only once an audit has run, because a score computed without findings would mislead);
+      - open findings with severity dots;
+      - shortcuts to Overview, Map, Chat (with the conversation count), Audit and Tools;
+      - "updated N ago";
+      - a ⋯ menu with Re-analyze and Remove (the confirmation names what is lost).
+    - Running analyses show progress text. Failures show the error.
+    - A filter box appears from 4 repositories.
+    - A three-step welcome appears when there are none.
+  - The header's API and LLM chips are removed (owner's request). The header shows a chip only when the API is offline or no AI provider is configured.
+- **Alternatives considered:**
+  - A unique database constraint on the source: raw strings differ for the same repository (slashes, case, `.git`), and existing databases already hold duplicates that would block the migration.
+  - Rejecting a duplicate add with an error: re-adding is a natural way to say "update this", so refreshing is friendlier.
+  - Fetching each card's health with its own request: N extra requests on every visit and every 1.5 s poll while something runs.
+- **Why this one:** the home page now answers "what is here, how healthy is it, what changed recently, where do I go next" without extra requests, and the same repository can no longer split its history across two entries.
+- **Consequences:**
+  - `RepoOut.summary` is optional and is filled only by the list endpoint.
+  - The duplicate "ArchonAI" entry already in the database needs a one-off merge: move its conversations and documents to the newer entry, then remove the old one. This step waits for the owner's approval.

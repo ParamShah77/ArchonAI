@@ -260,7 +260,8 @@ export function GraphExplorer() {
             <Search size={14} className="absolute left-2.5 top-2.5 text-faint" />
             <input
               ref={searchRef}
-              className="input pl-8 py-1.5"
+              className="input py-1.5"
+              style={{ paddingLeft: 32 }}
               placeholder="Find a file, function, endpoint…  ( / )"
               value={q}
               onChange={(e) => {

@@ -12,6 +12,18 @@ class RepoCreate(BaseModel):
     source: str = Field(..., description="Git URL (https/ssh) or absolute local path", min_length=1)
 
 
+class RepoSummary(BaseModel):
+    """What the repository list shows at a glance (computed from stored rows, never re-analyzes)."""
+
+    health_score: float | None = None
+    health_grade: str = ""
+    open_findings: int = 0
+    open_by_severity: dict[str, int] = {}
+    last_analysis_at: datetime | None = None
+    conversations: int = 0
+    last_activity_at: datetime | None = None
+
+
 class RepoOut(BaseModel):
     id: str
     name: str
@@ -24,6 +36,7 @@ class RepoOut(BaseModel):
     stack: dict[str, Any] = {}
     created_at: datetime
     updated_at: datetime
+    summary: RepoSummary | None = None
 
     model_config = {"from_attributes": True}
 

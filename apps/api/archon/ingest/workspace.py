@@ -32,6 +32,20 @@ def is_git_url(source: str) -> bool:
     return bool(_URL_RE.match(source.strip()))
 
 
+def source_key(source: str) -> str:
+    """One spelling per repository, so adding it twice finds the first entry instead of a duplicate.
+
+    Git: ``git@host:org/repo.git``, ``https://user@host/org/repo/`` and ``HTTPS://Host/Org/Repo`` are one key
+    (hosts and GitHub paths are case-insensitive). Local: the resolved absolute path, case-folded on Windows.
+    """
+    s = source.strip()
+    if is_git_url(s):
+        s = s.rstrip("/").removesuffix(".git").lower()
+        s = re.sub(r"^git@([^:/]+):", r"https://\1/", s)
+        return re.sub(r"^[a-z+]+://([^@/]*@)?", "https://", s)
+    return os.path.normcase(str(Path(s).expanduser().resolve()))
+
+
 def _repo_name_from_source(source: str) -> str:
     tail = source.rstrip("/").split("/")[-1]
     return tail[:-4] if tail.endswith(".git") else tail or "repo"

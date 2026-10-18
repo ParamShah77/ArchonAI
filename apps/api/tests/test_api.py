@@ -117,3 +117,14 @@ async def test_api_key_middleware(fixture_repo: Path):
     finally:
         os.environ["ARCHON_API_KEY"] = ""
         get_settings.cache_clear()
+
+
+async def test_adding_the_same_repo_twice_refreshes_it(client: AsyncClient, fixture_repo: Path):
+    first = await _ingest(client, str(fixture_repo))
+    # another spelling of the same folder (trailing separator) finds the first entry
+    second = await _ingest(client, str(fixture_repo) + "/")
+    assert second["id"] == first["id"]
+    repos = (await client.get("/repos")).json()
+    assert [r["id"] for r in repos].count(first["id"]) == 1
+    summary = next(r for r in repos if r["id"] == first["id"])["summary"]
+    assert summary["open_findings"] == 0 and summary["last_activity_at"]

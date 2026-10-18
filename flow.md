@@ -71,10 +71,10 @@ GET /repos/{id}/architecture
 
 ### 3.4 Web app (Phase 1)
 ```
-apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /health every 15s)
-  /                                    page.tsx -> <RepoList/>
-                                         useApi("repos") -> GET /repos (polls every 1.5s while any repo is pending/ingesting)
-                                         submit -> POST /repos -> refresh()
+apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /health every 15s; shown only when offline / AI off)
+  /                                    page.tsx -> <RepoList/>: GET /repos (with summary; polled every 1.5 s while an
+                                         analysis runs) -> <RepoCard/> per repository; add -> POST /repos (an existing
+                                         source key returns that entry and re-analyzes it) (D-033)
   /repos/[id]                          layout.tsx awaits params -> <RepoShell id>
                                          RepoShell: GET /repos/{id} (polls while not ready), provides RepoContext, tabs
                                          page.tsx -> <RepoOverview/>: stats from repo row, GET /repos/{id}/architecture
@@ -228,6 +228,25 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-18 (later) — Homepage redesign and one entry per repository (decision D-033)
+- `apps/api/archon/ingest/workspace.py`: new `source_key()`.
+- `apps/api/archon/api/routes/repos.py`:
+  - `create_repo` returns and refreshes an existing entry with the same key, and names local folders by their last path part;
+  - `list_repos` adds summaries (`_summaries`: findings, health, runs, conversations) and sorts by last activity (`_aware` for naive SQLite times).
+- `apps/api/archon/api/schemas.py`: `RepoSummary`, `RepoOut.summary`.
+- `apps/web/src/lib/api.ts`: `RepoSummary` type.
+- `apps/web/src/components/RepoList.tsx` (rewritten): add box with a source icon and a duplicate notice, filter, `RepoCard` (language bar, stats, grade, findings, shortcuts, ⋯ menu), `Findings`, `Quick`, `Welcome`, plus the helpers `parseUtc`, `timeAgo` and `shortSource`.
+- `apps/web/src/app/page.tsx`: new heading and intro.
+- `GraphExplorer.tsx` and `RepoList.tsx`: inputs with a leading icon set their left padding inline. `.input` is unlayered CSS and overrides Tailwind's `pl-*`, so the icon used to overlap the text.
+- Tests: `test_workspace.py::test_source_key_matches_spellings_of_one_repository`, `test_api.py::test_adding_the_same_repo_twice_refreshes_it` (42 backend tests).
+- Verified at 1362×928 and 375×812:
+  - cards, menu, filter, and the duplicate add of ChromaGen (same entry refreshed, still 5 repositories);
+  - no horizontal scroll on a phone;
+  - lint, build, 14 web tests and 42 backend tests pass.
+
+### Session 2026-10-18 — Quieter header
+- `components/ApiStatus.tsx`: the always-on "API v0.1.0" and "LLM: groq +3" chips are removed at the owner's request. The header now shows a chip only when something is wrong: "API offline" or "AI off" (no LLM key). The health poll (`GET /health` every 15 s) is unchanged.
 
 ### Session 2026-10-17 — Graph view: Neo4j-style node-link graph (decision D-032)
 - New `forceData.ts`:

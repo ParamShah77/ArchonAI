@@ -41,6 +41,18 @@ export interface Repo {
   };
   created_at: string;
   updated_at: string;
+  summary?: RepoSummary | null; // only on the repository list
+}
+
+/** What the repository list shows at a glance (stored results; nothing is re-analyzed). */
+export interface RepoSummary {
+  health_score: number | null;
+  health_grade: string;
+  open_findings: number;
+  open_by_severity: Partial<Record<Severity, number>>;
+  last_analysis_at: string | null;
+  conversations: number;
+  last_activity_at: string | null;
 }
 
 export type NodeKind =

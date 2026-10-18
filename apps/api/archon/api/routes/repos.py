@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from archon.api.deps import RepoDep, SessionDep
-from archon.api.schemas import RepoCreate, RepoOut
-from archon.db.models import Repository
+from archon.api.schemas import RepoCreate, RepoOut, RepoSummary
+from archon.db.models import AnalysisRun, Conversation, FindingRow, HealthSnapshot, Repository
 from archon.graph.query import graph_cache
-from archon.ingest.workspace import is_git_url, remove_checkout
+from archon.ingest.workspace import is_git_url, remove_checkout, source_key
 from archon.services.ingest import ingest_repository
 
 router = APIRouter(prefix="/repos", tags=["repositories"])
@@ -21,8 +23,21 @@ async def create_repo(body: RepoCreate, session: SessionDep, tasks: BackgroundTa
 
         if not Path(source).expanduser().is_dir():
             raise HTTPException(400, "source must be a git URL or an existing local directory")
+    # the same repository added again (any spelling) refreshes the existing entry instead of duplicating it,
+    # so its chats, docs and findings history stay together
+    key = source_key(source)
+    for existing in (await session.execute(select(Repository))).scalars():
+        if source_key(existing.source) == key:
+            if existing.status not in ("pending", "ingesting"):
+                existing.status = "pending"
+                await session.commit()
+                graph_cache.invalidate(existing.id)
+                tasks.add_task(ingest_repository, existing.id)
+            return existing
     repo = Repository(
-        name=source.rstrip("/").split("/")[-1].removesuffix(".git") or "repo", source=source, status="pending"
+        name=source.rstrip("/\\").replace("\\", "/").split("/")[-1].removesuffix(".git") or "repo",
+        source=source,
+        status="pending",
     )
     session.add(repo)
     await session.commit()
@@ -32,8 +47,72 @@ async def create_repo(body: RepoCreate, session: SessionDep, tasks: BackgroundTa
 
 
 @router.get("", response_model=list[RepoOut])
-async def list_repos(session: SessionDep) -> list[Repository]:
-    return list((await session.execute(select(Repository).order_by(Repository.created_at.desc()))).scalars())
+async def list_repos(session: SessionDep) -> list[RepoOut]:
+    repos = list((await session.execute(select(Repository))).scalars())
+    summaries = await _summaries(session)
+    out: list[tuple[datetime, RepoOut]] = []
+    for r in repos:
+        item = RepoOut.model_validate(r)
+        summary = summaries.get(r.id, RepoSummary())
+        times = (r.updated_at, summary.last_analysis_at, summary.last_activity_at)
+        summary.last_activity_at = max(_aware(d) for d in times if d)
+        item.summary = summary
+        out.append((summary.last_activity_at, item))
+    # most recently used first
+    out.sort(key=lambda t: t[0], reverse=True)
+    return [item for _, item in out]
+
+
+def _aware(d: datetime) -> datetime:
+    """SQLite returns naive datetimes; they are stored as UTC."""
+    return d if d.tzinfo else d.replace(tzinfo=UTC)
+
+
+async def _summaries(session: SessionDep) -> dict[str, RepoSummary]:
+    """Health, open findings and activity for every repository in a few grouped queries."""
+    out: dict[str, RepoSummary] = {}
+
+    def get(rid: str) -> RepoSummary:
+        return out.setdefault(rid, RepoSummary())
+
+    rows = await session.execute(
+        select(FindingRow.repo_id, FindingRow.severity, func.count())
+        .where(FindingRow.status == "open")
+        .group_by(FindingRow.repo_id, FindingRow.severity)
+    )
+    for rid, sev, n in rows:
+        s = get(rid)
+        s.open_by_severity[sev] = n
+        s.open_findings += n
+    latest = (
+        select(HealthSnapshot.repo_id, func.max(HealthSnapshot.created_at).label("at"))
+        .group_by(HealthSnapshot.repo_id)
+        .subquery()
+    )
+    snaps = await session.execute(
+        select(HealthSnapshot).join(
+            latest, (HealthSnapshot.repo_id == latest.c.repo_id) & (HealthSnapshot.created_at == latest.c.at)
+        )
+    )
+    for snap in snaps.scalars():
+        s = get(snap.repo_id)
+        s.health_score = round(snap.score, 1)
+        s.health_grade = str((snap.breakdown or {}).get("grade", ""))
+    runs = await session.execute(
+        select(AnalysisRun.repo_id, func.max(AnalysisRun.finished_at))
+        .where(AnalysisRun.status == "done")
+        .group_by(AnalysisRun.repo_id)
+    )
+    for rid, at in runs:
+        get(rid).last_analysis_at = at
+    convs = await session.execute(
+        select(Conversation.repo_id, func.count(), func.max(Conversation.created_at)).group_by(Conversation.repo_id)
+    )
+    for rid, n, at in convs:
+        s = get(rid)
+        s.conversations = n
+        s.last_activity_at = at
+    return out
 
 
 @router.get("/{repo_id}", response_model=RepoOut)

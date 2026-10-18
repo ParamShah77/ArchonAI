@@ -4,7 +4,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-from archon.ingest.workspace import _refresh_clone, _remove_tree
+from archon.ingest.workspace import _refresh_clone, _remove_tree, source_key
 
 
 def test_remove_tree_deletes_read_only_files(tmp_path: Path):
@@ -39,3 +39,15 @@ def test_refreshing_a_broken_clone_never_touches_the_enclosing_repo(tmp_path: Pa
     assert _git(["rev-parse", "HEAD"], outer) == head
     assert "example.invalid" not in _git(["remote", "-v"], outer)
     assert (outer / "keep.txt").read_text() == "precious"
+
+
+def test_source_key_matches_spellings_of_one_repository(tmp_path: Path):
+    same = [
+        "https://github.com/Org/Repo.git",
+        "https://github.com/org/repo/",
+        "git@github.com:org/repo.git",
+        "ssh://git@github.com/org/repo",
+    ]
+    assert len({source_key(s) for s in same}) == 1
+    assert source_key("https://github.com/org/repo") != source_key("https://github.com/org/other")
+    assert source_key(str(tmp_path)) == source_key(str(tmp_path / "x" / ".."))
