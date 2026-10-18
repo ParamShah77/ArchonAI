@@ -12,6 +12,7 @@ import contextvars
 import logging
 import re
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 from archon.llm.base import LLMError, LLMProvider, Message
@@ -72,7 +73,6 @@ class FallbackChain(LLMProvider):
         ordered = sorted(self.links, key=lambda p: self.stats[self.label(p)].cooldown_until > now)
         for p in ordered:
             lab = self.label(p)
-            st = self.stats[lab]
             t0 = time.perf_counter()
             try:
                 text = await asyncio.wait_for(
@@ -82,23 +82,61 @@ class FallbackChain(LLMProvider):
                     timeout=self.timeout_s,
                 )
             except Exception as e:  # noqa: BLE001 - every failure is a reason to try the next link
-                reason = "timeout" if isinstance(e, TimeoutError) else f"{type(e).__name__}: {str(e)[:200]}"
-                st.last_error = reason
-                if type(e).__name__ == "PromptTooLarge":
-                    # Not a health problem: this request is just too big for the link. No cooldown.
-                    errors.append(f"{lab} → skipped (prompt too large)")
-                    continue
-                st.failed += 1
-                st.cooldown_until = time.monotonic() + self._cooldown_for(e)
-                errors.append(f"{lab} → {reason}")
-                log.warning("LLM link %s failed (%s); trying next", lab, reason)
+                self._failed(lab, e, errors)
                 continue
-            st.ok += 1
-            st.last_latency_s = round(time.perf_counter() - t0, 2)
-            st.cooldown_until = 0.0
-            last_answered_by.set(lab)
+            self._succeeded(lab, t0)
             return text
         raise LLMError("all LLM providers failed: " + " | ".join(errors))
+
+    async def stream(
+        self, messages: list[Message], *, system: str = "", temperature: float = 0.2, max_tokens: int = 4096
+    ) -> AsyncIterator[str]:
+        """Stream from the first link that starts answering within the timeout (decisions.md D-034).
+
+        Links are tried in order until one produces its first piece. After that the answer belongs to that link
+        (switching mid-answer would mix two answers), so a later failure ends the stream with an error.
+        """
+        errors: list[str] = []
+        now = time.monotonic()
+        ordered = sorted(self.links, key=lambda p: self.stats[self.label(p)].cooldown_until > now)
+        for p in ordered:
+            lab = self.label(p)
+            t0 = time.perf_counter()
+            pieces = p.stream(messages, system=system, temperature=temperature, max_tokens=max_tokens).__aiter__()
+            try:
+                first = await asyncio.wait_for(pieces.__anext__(), timeout=self.timeout_s)
+            except StopAsyncIteration:
+                self._failed(lab, LLMError("returned no text"), errors)
+                continue
+            except Exception as e:  # noqa: BLE001 - every failure before the first piece: try the next link
+                self._failed(lab, e, errors)
+                continue
+            self._succeeded(lab, t0)
+            yield first
+            async for piece in pieces:
+                yield piece
+            return
+        raise LLMError("all LLM providers failed: " + " | ".join(errors))
+
+    def _failed(self, lab: str, e: BaseException, errors: list[str]) -> None:
+        st = self.stats[lab]
+        reason = "timeout" if isinstance(e, TimeoutError) else f"{type(e).__name__}: {str(e)[:200]}"
+        st.last_error = reason
+        if type(e).__name__ == "PromptTooLarge":
+            # Not a health problem: this request is just too big for the link. No cooldown.
+            errors.append(f"{lab} → skipped (prompt too large)")
+            return
+        st.failed += 1
+        st.cooldown_until = time.monotonic() + self._cooldown_for(e)
+        errors.append(f"{lab} → {reason}")
+        log.warning("LLM link %s failed (%s); trying next", lab, reason)
+
+    def _succeeded(self, lab: str, t0: float) -> None:
+        st = self.stats[lab]
+        st.ok += 1
+        st.last_latency_s = round(time.perf_counter() - t0, 2)
+        st.cooldown_until = 0.0
+        last_answered_by.set(lab)
 
     def _cooldown_for(self, e: BaseException) -> float:
         """Honour the provider's "try again in Ns" hint on rate limits; otherwise the default cooldown."""

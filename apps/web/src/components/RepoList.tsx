@@ -22,25 +22,12 @@ import {
 import { api, SEVERITY_COLOR, type Repo, type Severity } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { ErrorBox, Spinner, StatusPill } from "@/components/ui";
+import { parseUtc, timeAgo } from "@/lib/time";
 
 const busy = (r: Repo) => r.status === "pending" || r.status === "ingesting";
 const anyBusy = (repos: unknown) => Array.isArray(repos) && repos.some(busy);
 const isGit = (s: string) => /^(https?:\/\/|git@|ssh:\/\/|git:\/\/)/i.test(s.trim());
 
-/** The API stores UTC without a zone suffix; read it as UTC. */
-function parseUtc(s: string | null | undefined): Date | null {
-  if (!s) return null;
-  return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : `${s}Z`);
-}
-export function timeAgo(d: Date | null): string {
-  if (!d) return "";
-  const s = Math.max(0, (Date.now() - d.getTime()) / 1000);
-  if (s < 60) return "just now";
-  const units: [number, string][] = [[60, "min"], [3600, "h"], [86400, "d"], [604800, "w"], [2629800, "mo"], [31557600, "y"]];
-  let i = 0;
-  while (i + 1 < units.length && s >= units[i + 1][0]) i++;
-  return `${Math.floor(s / units[i][0])} ${units[i][1]} ago`;
-}
 /** `github.com/org/repo` for remotes; `~\Desktop\x` for folders under the user's home. */
 function shortSource(src: string): string {
   if (isGit(src)) return src.replace(/^(https?:\/\/|ssh:\/\/|git:\/\/)([^@/]*@)?/i, "").replace(/^git@([^:]+):/i, "$1/").replace(/\.git$/i, "").replace(/\/$/, "");
@@ -59,12 +46,22 @@ const GRADE_COLOR: Record<string, string> = { A: "var(--ok)", B: "#b5e08a", C: "
 
 export function RepoList() {
   const { data: repos, error, loading, refresh } = useApi("repos", () => api.repos.list(), { pollMs: 1500, pollWhile: anyBusy });
+  // checked once per visit (and again after a re-analysis): local folders by fingerprint, remotes by head commit
+  const readyKey = repos?.filter((r) => r.status === "ready").map((r) => `${r.id}${r.updated_at}`).join() ?? "";
+  const { data: fresh } = useApi(readyKey ? `freshness:${readyKey}` : null, () => api.repos.freshness());
   const [source, setSource] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  // the quick-jump palette's "Add a repository" lands here (?add=1, or an event when already on this page)
+  useEffect(() => {
+    const focus = () => inputRef.current?.focus();
+    if (new URLSearchParams(window.location.search).has("add")) focus();
+    window.addEventListener("archon:add", focus);
+    return () => window.removeEventListener("archon:add", focus);
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -147,7 +144,7 @@ export function RepoList() {
             <p className="text-sm text-faint py-6 text-center">No repository matches “{q}”.</p>
           ) : (
             <ul className="grid gap-4 md:grid-cols-2">
-              {shown.map((r) => <RepoCard key={r.id} repo={r} onChange={refresh} />)}
+              {shown.map((r) => <RepoCard key={r.id} repo={r} onChange={refresh} changed={fresh?.[r.id]?.changed ? fresh[r.id].detail : null} />)}
             </ul>
           )}
         </section>
@@ -156,7 +153,7 @@ export function RepoList() {
   );
 }
 
-function RepoCard({ repo: r, onChange }: { repo: Repo; onChange: () => void }) {
+function RepoCard({ repo: r, onChange, changed }: { repo: Repo; onChange: () => void; changed: string | null }) {
   const [menu, setMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -206,6 +203,9 @@ function RepoCard({ repo: r, onChange }: { repo: Repo; onChange: () => void }) {
             </div>
             <div className="text-xs text-faint mono truncate" title={r.source}>{shortSource(r.source)}</div>
           </div>
+          {ready && s?.health_grade && s.last_analysis_at && s.health_history.length > 1 && (
+            <Trend values={s.health_history} />
+          )}
           {ready && s?.health_grade && s.last_analysis_at && (
             <span
               className="shrink-0 h-9 w-9 rounded-md border flex flex-col items-center justify-center leading-none mr-7"
@@ -266,7 +266,17 @@ function RepoCard({ repo: r, onChange }: { repo: Repo; onChange: () => void }) {
         ) : (
           <span className="px-2 text-faint">{r.status === "failed" ? "Fix the source, then re-analyze" : "Shortcuts appear when the analysis is done"}</span>
         )}
-        <span className="ml-auto text-faint pr-1 whitespace-nowrap" title={when?.toLocaleString()}>{timeAgo(when)}</span>
+        {changed && ready ? (
+          <button
+            className="ml-auto flex items-center gap-1 rounded px-2 py-1 text-warn hover:bg-elev2"
+            title={`${changed} since the last analysis (${when?.toLocaleString() ?? ""})`}
+            onClick={reanalyze}
+          >
+            <RefreshCw size={12} /> Changed · re-analyze
+          </button>
+        ) : (
+          <span className="ml-auto text-faint pr-1 whitespace-nowrap" title={when?.toLocaleString()}>{timeAgo(when)}</span>
+        )}
       </div>
 
       {/* actions */}
@@ -291,6 +301,21 @@ function RepoCard({ repo: r, onChange }: { repo: Repo; onChange: () => void }) {
         )}
       </div>
     </li>
+  );
+}
+
+/** Health over the last analyses: a small line, green when it went up, rose when it went down. */
+function Trend({ values }: { values: number[] }) {
+  const w = 44, h = 18, lo = Math.min(...values) - 2, hi = Math.max(...values) + 2;
+  const pts = values.map((v, i) => `${((i / (values.length - 1)) * w).toFixed(1)},${(h - ((v - lo) / (hi - lo)) * h).toFixed(1)}`);
+  const delta = values[values.length - 1] - values[0];
+  const color = Math.abs(delta) < 0.5 ? "var(--fg-faint)" : delta > 0 ? "var(--ok)" : "var(--danger)";
+  return (
+    <svg width={w + 3} height={h + 2} className="shrink-0 mt-2.5 mr-1.5 overflow-visible" aria-label={`Health trend ${values.join(" → ")}`}>
+      <title>{`Health over the last ${values.length} analyses: ${values.join(" → ")}`}</title>
+      <polyline points={pts.join(" ")} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={w} cy={pts[pts.length - 1].split(",")[1]} r={2} fill={color} />
+    </svg>
   );
 }
 

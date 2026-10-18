@@ -8,6 +8,7 @@ import { api, type ChatMessage, type ChatSource } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { useRepo } from "@/components/RepoShell";
 import { Markdown } from "@/components/Markdown";
+import { linkCitations } from "./citations";
 import { ErrorBox, KindBadge, Spinner } from "@/components/ui";
 
 const SUGGESTIONS = [
@@ -30,6 +31,7 @@ export function ChatPanel() {
   const [error, setError] = useState<string | null>(null);
   const [reindexing, setReindexing] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
+  const seq = useRef(0); // local ids for messages not yet saved
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
@@ -47,15 +49,29 @@ export function ChatPanel() {
     setQ("");
     setBusy(true);
     setError(null);
-    setMessages((m) => [...m, { id: `tmp-${Date.now()}`, role: "user", content: question, sources: [], created_at: "" }]);
+    const n = ++seq.current;
+    const aid = `a-${n}`;
+    setMessages((m) => [
+      ...m,
+      { id: `q-${n}`, role: "user", content: question, sources: [], created_at: "" },
+      { id: aid, role: "assistant", content: "", sources: [], created_at: "" },
+    ]);
+    // the answer appears as it is written (decisions.md D-034)
+    const patch = (f: (m: ChatMessage) => ChatMessage) => setMessages((ms) => ms.map((m) => (m.id === aid ? f(m) : m)));
     try {
-      const r = await api.chat.ask(repo.id, question, cid);
-      if (!cid) {
-        setCid(r.conversation_id);
-        convs.refresh();
-      }
-      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: r.answer, sources: r.sources, created_at: "", answered_by: r.answered_by }]);
+      await api.chat.stream(repo.id, question, cid, (ev) => {
+        if (ev.type === "sources") patch((m) => ({ ...m, sources: ev.sources }));
+        else if (ev.type === "delta") patch((m) => ({ ...m, content: m.content + ev.text }));
+        else if (ev.type === "done") {
+          patch((m) => ({ ...m, answered_by: ev.answered_by }));
+          if (!cid) {
+            setCid(ev.conversation_id);
+            convs.refresh();
+          }
+        }
+      });
     } catch (e) {
+      setMessages((ms) => ms.filter((m) => !(m.id === aid && !m.content)));
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
@@ -114,13 +130,18 @@ export function ChatPanel() {
           {messages.map((m) => (
             <div key={m.id} className={`max-w-3xl ${m.role === "user" ? "ml-auto" : ""}`}>
               <div className={`rounded-lg px-4 py-3 ${m.role === "user" ? "bg-accent-soft border border-accent/30" : "card"}`}>
-                {m.role === "user" ? <p className="text-sm whitespace-pre-wrap">{m.content}</p> : <Markdown>{m.content}</Markdown>}
+                {m.role === "user" ? (
+                  <p className="text-sm whitespace-pre-wrap">{m.content}</p>
+                ) : m.content ? (
+                  <Markdown>{linkCitations(m.content, repo.id, m.sources)}</Markdown>
+                ) : (
+                  <div className="flex items-center gap-2 text-muted text-sm"><Spinner /> Reading the code graph…</div>
+                )}
                 {m.answered_by && <div className="mt-2 text-[11px] text-faint mono">answered by {m.answered_by}</div>}
               </div>
               {m.sources?.length > 0 && <Sources repoId={repo.id} sources={m.sources} />}
             </div>
           ))}
-          {busy && <div className="card px-4 py-3 max-w-3xl flex items-center gap-2 text-muted text-sm"><Spinner /> Reading the code graph…</div>}
           {error && <ErrorBox>{error}</ErrorBox>}
           <div ref={bottom} />
         </div>

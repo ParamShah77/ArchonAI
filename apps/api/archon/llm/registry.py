@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from functools import lru_cache
 from typing import Any
 
@@ -106,6 +107,19 @@ async def complete(
 ) -> str:
     messages = [*(history or []), Message("user", prompt)]
     return await get_chain().complete(messages, system=system, temperature=temperature, max_tokens=max_tokens)
+
+
+def stream(
+    prompt: str,
+    *,
+    system: str = "",
+    temperature: float = 0.2,
+    max_tokens: int = 4096,
+    history: list[Message] | None = None,
+) -> AsyncIterator[str]:
+    """Like complete(), but yields the answer in pieces as it is written."""
+    messages = [*(history or []), Message("user", prompt)]
+    return get_chain().stream(messages, system=system, temperature=temperature, max_tokens=max_tokens)
 
 
 async def complete_json(prompt: str, *, system: str = "", temperature: float = 0.1, max_tokens: int = 4096) -> Any:

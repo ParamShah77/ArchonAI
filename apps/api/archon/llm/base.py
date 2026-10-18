@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +55,13 @@ class LLMProvider(ABC):
         max_tokens: int = 4096,
         json_mode: bool = False,
     ) -> str: ...
+
+    async def stream(
+        self, messages: list[Message], *, system: str = "", temperature: float = 0.2, max_tokens: int = 4096
+    ) -> AsyncIterator[str]:
+        """Yield the answer in pieces as it is written (decisions.md D-034). Without native streaming the
+        whole answer arrives as one piece."""
+        yield await self.complete(messages, system=system, temperature=temperature, max_tokens=max_tokens)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         raise LLMError(f"provider {self.name} does not support embeddings")

@@ -17,6 +17,7 @@ class RepoSummary(BaseModel):
 
     health_score: float | None = None
     health_grade: str = ""
+    health_history: list[float] = []  # oldest -> newest, at most 12
     open_findings: int = 0
     open_by_severity: dict[str, int] = {}
     last_analysis_at: datetime | None = None

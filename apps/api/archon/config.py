@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     xai_api_key: str = ""
     xai_model: str = "grok-3-mini"
 
+    # Run the static analyzers right after every ingestion (health and findings without a visit to Audit)
+    archon_auto_analyze: bool = True
+
     # Storage
     database_url: str = "sqlite+aiosqlite:///./data/archon.db"
     archon_workspace: str = "./workspace"

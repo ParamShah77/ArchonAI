@@ -13,14 +13,17 @@ from typing import Any
 from sqlalchemy import select
 
 from archon.analysis.base import AnalysisContext
+from archon.analysis.runner import ANALYZERS, run_analysis_job
+from archon.config import get_settings
 from archon.context.index import index_repository
-from archon.db.models import Repository
+from archon.db.models import AnalysisRun, Repository
 from archon.db.session import session_factory
 from archon.graph.builder import BuiltGraph, build_repo_graph
 from archon.graph.model import FileExtraction
 from archon.graph.query import graph_cache
 from archon.graph.store import save_graph
 from archon.ingest.extractors import extract_file
+from archon.ingest.freshness import tree_fingerprint
 from archon.ingest.manifests import Dependency, go_module_name, parse_manifest
 from archon.ingest.parsing import PARSEABLE
 from archon.ingest.scanner import walk_files
@@ -95,6 +98,7 @@ async def ingest_repository(repo_id: str) -> None:
     try:
         checkout: Checkout = await asyncio.to_thread(clone_or_locate, source, repo_id)
         result = await asyncio.to_thread(analyze_checkout, checkout.root, checkout.name)
+        fingerprint = await asyncio.to_thread(tree_fingerprint, checkout.root)
     except Exception as e:  # noqa: BLE001
         log.exception("ingestion failed for %s", repo_id)
         async with Session() as session:
@@ -120,6 +124,7 @@ async def ingest_repository(repo_id: str) -> None:
                 "languages": result.languages,
                 "parse_errors": result.parse_errors[:50],
                 "analysis_seconds": round(result.seconds, 2),
+                "fingerprint": fingerprint,
                 **result.graph.stats,
             }
             repo.status = "ready"
@@ -134,6 +139,18 @@ async def ingest_repository(repo_id: str) -> None:
                 await index_repository(session, AnalysisContext(repo, rg))
     except Exception:  # noqa: BLE001
         log.exception("retrieval indexing failed for %s (chat will still work after POST /index)", repo_id)
+    # Audit right away (static analyzers, no AI calls), so health and findings exist without a visit to the
+    # Audit tab (decisions.md D-034)
+    if get_settings().archon_auto_analyze:
+        try:
+            async with Session() as session:
+                run = AnalysisRun(repo_id=repo_id, analyzers=list(ANALYZERS), status="pending")
+                session.add(run)
+                await session.commit()
+                run_id = run.id
+            await run_analysis_job(run_id)
+        except Exception:  # noqa: BLE001
+            log.exception("automatic analysis failed for %s (run it from the Audit tab)", repo_id)
     log.info(
         "ingested %s: %s nodes, %s edges in %.1fs",
         repo_id,

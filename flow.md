@@ -42,6 +42,9 @@ POST /repos {url | local_path}
       6. manifests.detect_dependencies(root) → dependency nodes + depends_on edges
       7. graph.store.save(repo_id, nodes, edges) → DB
       8. stack.detect(root, graph) → tech-stack summary stored on the repo row
+      9. freshness.tree_fingerprint(root) → stats.fingerprint (D-034)
+     10. context/index.index_repository → retrieval chunks
+     11. ARCHON_AUTO_ANALYZE: AnalysisRun(all analyzers) → runner.run_analysis_job → findings + health snapshot
   → 202 Accepted {repo_id, status:"ingesting"}   (work runs as a background task)
 GET /repos/{id} → status: ingesting | ready | failed
 ```
@@ -72,9 +75,11 @@ GET /repos/{id}/architecture
 ### 3.4 Web app (Phase 1)
 ```
 apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /health every 15s; shown only when offline / AI off)
+  (every page shell)                   <CommandPalette/>: Ctrl/⌘+K -> repos, sections, tools, GET /repos/{id}/search
   /                                    page.tsx -> <RepoList/>: GET /repos (with summary; polled every 1.5 s while an
                                          analysis runs) -> <RepoCard/> per repository; add -> POST /repos (an existing
-                                         source key returns that entry and re-analyzes it) (D-033)
+                                         source key returns that entry and re-analyzes it) (D-033); GET /repos/freshness
+                                         once per visit -> "Changed · re-analyze" (D-034)
   /repos/[id]                          layout.tsx awaits params -> <RepoShell id>
                                          RepoShell: GET /repos/{id} (polls while not ready), provides RepoContext, tabs
                                          page.tsx -> <RepoOverview/>: stats from repo row, GET /repos/{id}/architecture
@@ -133,6 +138,11 @@ POST /repos/{id}/chat {question, conversation_id?}
       3. llm.complete(system=SYSTEM, history, prompt=context+question)   (skipped if no provider)
       4. persist user + assistant messages (sources JSON on the assistant row)
   → {conversation_id, answer, sources[]}
+POST /repos/{id}/chat/stream {question, conversation_id?}   (what the web app uses, D-034)
+  → routes/intelligence.chat_stream → services/chat.ask_stream: steps 1–2 before the response starts
+  → NDJSON events: {type:"sources"} → {type:"delta", text}… (llm.stream → FallbackChain.stream: first link
+    that starts answering) → persist with a fresh session → {type:"done", conversation_id, answered_by}
+  web: api.chat.stream reads lines → ChatPanel grows the answer → chat/citations.linkCitations → map links
 Retrieval index: services/ingest.ingest_repository → context/index.index_repository (after graph save)
   chunker.build_chunks(ctx) → CodeChunk rows (+embedding when available) → retrieval_cache.invalidate
   POST /repos/{id}/index rebuilds on demand (?embeddings=true|false)
@@ -228,6 +238,43 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-18 (evening) — Automatic audit, trend, freshness, quick jump, switcher, tool history, streaming chat (decision D-034)
+- Duplicate ArchonAI merge:
+  - The stale entry was deleted before its chats and docs were moved: the backup step used a wrong path and was chained with the delete.
+  - 4 of 5 chats (12 messages) and 7 of 10 docs were carved back out of freed SQLite pages into `data/recovered-2026-10-18.json`.
+  - `data/restore_recovered.py` puts them back. It waits for the owner, because the auto-mode classifier blocks live DB writes.
+- API:
+  - `services/ingest.py`: `tree_fingerprint` stored in stats; automatic `AnalysisRun` after indexing.
+  - New `ingest/freshness.py` (`tree_fingerprint`, `remote_head`).
+  - `routes/repos.py`: `freshness` endpoint and cache, `health_history` in `_summaries`.
+  - `config.py`: `archon_auto_analyze`.
+  - `db/models.py`: `ToolRun`.
+  - `routes/intelligence.py`: `_saved` on every tool endpoint, `tool-runs` list, get and delete, and `chat/stream`.
+  - `services/chat.py`: `_history`, `ask_stream`.
+  - `llm/base.py`, `openai_compat.py`, `gemini.py`: `stream()`.
+  - `llm/chain.py`: `stream()`, with `_failed` and `_succeeded` shared with `complete()`.
+  - `llm/registry.py` and `llm/__init__.py`: `stream`.
+- Web:
+  - New `CommandPalette.tsx` (`CommandPalette`, `PaletteButton`, `openPalette`), `tools/toolList.ts`, `chat/citations.ts`, `lib/time.ts`.
+  - `RepoShell.tsx`: `RepoSwitcher` and the palette.
+  - `RepoList.tsx`: `Trend`, freshness, "Changed · re-analyze", `archon:add` focus.
+  - `page.tsx`: palette and button.
+  - `ToolsPanel.tsx`: `RecentRuns`, plus `useRun` exposing `done` and `setResult`.
+  - `ChatPanel.tsx`: streaming via `api.chat.stream`, citations linked.
+  - `Markdown.tsx`: internal links use next/link.
+  - `lib/api.ts`: `RepoSummary.health_history`, `repos.freshness`, `tools.runs/run/removeRun`, `chat.stream`, `ChatStreamEvent`, `ToolRunInfo`.
+- Dependencies: vitest 5.0.5, @types/node 22, `npm audit fix` (sharp, source-map-js).
+- Tests:
+  - backend 46: automatic audit + freshness, tool runs, chain streaming ×2, chat stream events;
+  - web 17: citations ×3.
+- Verified in the browser:
+  - ChromaGen re-analyzed and audited automatically (B, 89 findings);
+  - trend line on ArchonAI;
+  - palette code search;
+  - chat answer streamed (931 → 1,636 characters while arriving) with file names linked to the map;
+  - Recent runs reopened a Debug result and its input;
+  - the switcher keeps the tab.
 
 ### Session 2026-10-18 (later) — Homepage redesign and one entry per repository (decision D-033)
 - `apps/api/archon/ingest/workspace.py`: new `source_key()`.

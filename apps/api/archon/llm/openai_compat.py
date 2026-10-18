@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator
 
 from openai import (
     APIConnectionError,
@@ -135,6 +136,28 @@ class OpenAICompatProvider(LLMProvider):
                 f"{self.name} {self.model} returned no text (finish_reason={getattr(choice, 'finish_reason', None)})"
             )
         return text
+
+    async def stream(
+        self, messages: list[Message], *, system: str = "", temperature: float = 0.2, max_tokens: int = 4096
+    ) -> AsyncIterator[str]:
+        budget = self._completion_budget(messages, system, max_tokens)
+        msgs: list[dict[str, str]] = [{"role": "system", "content": system}] if system else []
+        msgs += [{"role": m.role, "content": m.content} for m in messages]
+        try:
+            resp = await self.client.chat.completions.create(
+                model=self.model,
+                messages=msgs,  # type: ignore[arg-type]
+                temperature=temperature,
+                max_tokens=budget,
+                stream=True,
+            )
+        except RateLimitError as e:
+            self._learn_limit(str(e))
+            raise
+        async for chunk in resp:
+            piece = chunk.choices[0].delta.content if chunk.choices else None
+            if piece:
+                yield piece
 
 
 __all__ = ["OpenAICompatProvider", "PromptTooLarge", "RateLimitError", "estimate_tokens"]

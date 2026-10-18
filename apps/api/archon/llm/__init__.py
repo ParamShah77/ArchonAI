@@ -15,6 +15,7 @@ from archon.llm.registry import (
     get_provider,
     llm_available,
     llm_status,
+    stream,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "get_provider",
     "llm_available",
     "llm_status",
+    "stream",
 ]

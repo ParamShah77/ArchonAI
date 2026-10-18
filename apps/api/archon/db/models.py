@@ -178,6 +178,20 @@ class HealthSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class ToolRun(Base):
+    """One run of a Tools-tab workflow, kept so its result can be reopened later (decisions.md D-034)."""
+
+    __tablename__ = "tool_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    repo_id: Mapped[str] = mapped_column(String(32), ForeignKey("repositories.id", ondelete="CASCADE"), index=True)
+    tool: Mapped[str] = mapped_column(String(32), index=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    inputs: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class Conversation(Base):
     __tablename__ = "conversations"
 

@@ -32,13 +32,13 @@
     "@types/d3-selection": "^3.0.12",
     "@types/d3-transition": "^3.0.9",
     "@types/d3-zoom": "^3.0.9",
-    "@types/node": "^20",
+    "@types/node": "^22.20.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.8",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "vitest": "^3.2.7"
+    "vitest": "^5.0.5"
   }
 }

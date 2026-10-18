@@ -177,6 +177,17 @@ async def test_full_intelligence_flow(client: AsyncClient, fixture_repo: Path):
     conv = (await client.get(f"/repos/{rid}/conversations/{c['conversation_id']}")).json()
     assert [m["role"] for m in conv["messages"]] == ["user", "assistant"]
 
+    # the same answer, streamed as NDJSON events
+    import json as _json
+
+    r = await client.post(f"/repos/{rid}/chat/stream", json={"question": "How does place_order work?"})
+    events = [_json.loads(line) for line in r.text.splitlines() if line.strip()]
+    assert [e["type"] for e in events][0] == "sources" and events[-1]["type"] == "done"
+    text = "".join(e["text"] for e in events if e["type"] == "delta")
+    assert text.startswith("[mock:")
+    streamed = (await client.get(f"/repos/{rid}/conversations/{events[-1]['conversation_id']}")).json()
+    assert streamed["messages"][-1]["content"] == text
+
     # docs
     docs = (await client.post(f"/repos/{rid}/docs/generate")).json()
     kinds = {d["kind"] for d in docs}

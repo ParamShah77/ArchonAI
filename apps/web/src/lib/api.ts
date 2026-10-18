@@ -48,12 +48,26 @@ export interface Repo {
 export interface RepoSummary {
   health_score: number | null;
   health_grade: string;
+  health_history: number[]; // oldest -> newest
   open_findings: number;
   open_by_severity: Partial<Record<Severity, number>>;
   last_analysis_at: string | null;
   conversations: number;
   last_activity_at: string | null;
 }
+
+/** A saved Tools-tab run (result loaded separately). */
+export interface ToolRunInfo {
+  id: string;
+  tool: string;
+  title: string;
+  created_at: string;
+}
+
+export type ChatStreamEvent =
+  | { type: "sources"; sources: ChatSource[] }
+  | { type: "delta"; text: string }
+  | { type: "done"; conversation_id: string; answered_by: string };
 
 export type NodeKind =
   | "repo" | "directory" | "file" | "module" | "class" | "function" | "method" | "endpoint" | "table" | "dependency";
@@ -313,6 +327,40 @@ export const api = {
   },
   chat: {
     ask: (id: string, question: string, conversation_id?: string | null) => request<ChatResponse>(`/repos/${id}/chat`, { method: "POST", body: JSON.stringify({ question, conversation_id }) }),
+    /** The answer as it is written: sources first, then text pieces, then the saved conversation id. */
+    stream: async (id: string, question: string, conversation_id: string | null, onEvent: (e: ChatStreamEvent) => void, signal?: AbortSignal) => {
+      const res = await fetch(`${API_URL}/repos/${id}/chat/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(API_KEY ? { "X-API-Key": API_KEY } : {}) },
+        body: JSON.stringify({ question, conversation_id }),
+        signal,
+      });
+      if (!res.ok || !res.body) {
+        let detail = res.statusText;
+        try {
+          const body = await res.json();
+          detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail ?? body);
+        } catch {
+          /* non-JSON error body */
+        }
+        throw new ApiError(res.status, detail);
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (line) onEvent(JSON.parse(line) as ChatStreamEvent);
+        }
+      }
+      if (buf.trim()) onEvent(JSON.parse(buf) as ChatStreamEvent);
+    },
     conversations: (id: string) => request<Conversation[]>(`/repos/${id}/conversations`),
     conversation: (id: string, cid: string) => request<{ id: string; title: string; messages: ChatMessage[] }>(`/repos/${id}/conversations/${cid}`),
     reindex: (id: string) => request<{ chunks: number; embedded: number }>(`/repos/${id}/index`, { method: "POST" }),
@@ -331,6 +379,9 @@ export const api = {
     tests: (id: string, node_id: string) => request<AIResult>(`/repos/${id}/tests/generate`, { method: "POST", body: JSON.stringify({ node_id }) }),
     review: (id: string, diff: string, title: string) => request<AIResult>(`/repos/${id}/review`, { method: "POST", body: JSON.stringify({ diff, title }) }),
     logs: (id: string, logs: string, description: string) => request<AIResult>(`/repos/${id}/logs`, { method: "POST", body: JSON.stringify({ logs, description }) }),
+    runs: (id: string, tool: string) => request<ToolRunInfo[]>(`/repos/${id}/tool-runs${qs({ tool })}`),
+    run: (id: string, runId: string) => request<ToolRunInfo & { inputs: Record<string, unknown>; result: AIResult }>(`/repos/${id}/tool-runs/${runId}`),
+    removeRun: (id: string, runId: string) => request<void>(`/repos/${id}/tool-runs/${runId}`, { method: "DELETE" }),
   },
   repos: {
     list: () => request<Repo[]>("/repos"),
@@ -338,6 +389,8 @@ export const api = {
     create: (source: string) => request<Repo>("/repos", { method: "POST", body: JSON.stringify({ source }) }),
     reingest: (id: string) => request<Repo>(`/repos/${id}/reingest`, { method: "POST" }),
     remove: (id: string) => request<void>(`/repos/${id}`, { method: "DELETE" }),
+    /** changed: true / false, or null when it cannot tell (no fingerprint yet, remote unreachable) */
+    freshness: () => request<Record<string, { changed: boolean | null; detail: string }>>("/repos/freshness"),
   },
   graph: {
     view: (id: string, p: { level?: GraphLevel; focus?: string; depth?: number; kinds?: string; path_prefix?: string }) =>

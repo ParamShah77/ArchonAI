@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from archon.analysis.base import AnalysisContext
 from archon.api.deps import GraphDep, ReadyRepoDep, SessionDep
 from archon.context.index import index_repository
-from archon.db.models import ChatMessage, Conversation, Document
+from archon.db.models import ChatMessage, Conversation, Document, Repository, ToolRun
 from archon.services import chat as chat_service
 from archon.services import docs as docs_service
 from archon.services import reasoning
@@ -43,6 +47,18 @@ class ChatRequest(BaseModel):
 @router.post("/chat")
 async def chat(repo: ReadyRepoDep, rg: GraphDep, session: SessionDep, body: ChatRequest) -> dict[str, Any]:
     return await chat_service.ask(session, rg, repo, body.question, body.conversation_id)
+
+
+@router.post("/chat/stream")
+async def chat_stream(repo: ReadyRepoDep, rg: GraphDep, session: SessionDep, body: ChatRequest) -> StreamingResponse:
+    """The chat answer as newline-delimited JSON events, written as the model produces it (D-034)."""
+    events = await chat_service.ask_stream(session, rg, repo, body.question, body.conversation_id)
+
+    async def lines() -> AsyncIterator[bytes]:
+        async for ev in events:
+            yield (json.dumps(jsonable_encoder(ev)) + "\n").encode()
+
+    return StreamingResponse(lines(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/conversations")
@@ -157,9 +173,76 @@ class LogsRequest(BaseModel):
     description: str = ""
 
 
+# ---------------------------------------------------------------- tool history (decisions.md D-034)
+MAX_INPUT_CHARS = 20000
+KEEP_RUNS_PER_TOOL = 30
+
+
+def _title(text: str) -> str:
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    return line[:120]
+
+
+async def _saved(
+    session: SessionDep, repo: Repository, tool: str, title: str, inputs: dict[str, Any], out: dict[str, Any]
+) -> dict[str, Any]:
+    """Store the run (inputs trimmed) and return the result with its run id; keep the newest runs per tool."""
+    target = out.get("target") if isinstance(out.get("target"), dict) else None
+    trimmed = {k: v[:MAX_INPUT_CHARS] if isinstance(v, str) else v for k, v in inputs.items()}
+    out = jsonable_encoder(out)  # the JSON column needs plain values (datetimes, sets…)
+    run = ToolRun(
+        repo_id=repo.id, tool=tool, title=title or (target or {}).get("name", "") or tool, inputs=trimmed, result=out
+    )
+    session.add(run)
+    await session.flush()
+    old = (
+        select(ToolRun.id)
+        .where(ToolRun.repo_id == repo.id, ToolRun.tool == tool)
+        .order_by(ToolRun.created_at.desc())
+        .offset(KEEP_RUNS_PER_TOOL)
+    )
+    await session.execute(delete(ToolRun).where(ToolRun.id.in_(old)))
+    await session.commit()
+    return {**out, "run_id": run.id}
+
+
+@router.get("/tool-runs")
+async def tool_runs(repo: ReadyRepoDep, session: SessionDep, tool: str | None = None) -> list[dict[str, Any]]:
+    q = select(ToolRun.id, ToolRun.tool, ToolRun.title, ToolRun.created_at).where(ToolRun.repo_id == repo.id)
+    if tool:
+        q = q.where(ToolRun.tool == tool)
+    rows = await session.execute(q.order_by(ToolRun.created_at.desc()).limit(50))
+    return [{"id": i, "tool": t, "title": ti, "created_at": c} for i, t, ti, c in rows]
+
+
+@router.get("/tool-runs/{run_id}")
+async def tool_run(repo: ReadyRepoDep, session: SessionDep, run_id: str) -> dict[str, Any]:
+    r = await session.get(ToolRun, run_id)
+    if r is None or r.repo_id != repo.id:
+        raise HTTPException(404, "run not found")
+    return {
+        "id": r.id,
+        "tool": r.tool,
+        "title": r.title,
+        "inputs": r.inputs,
+        "result": r.result,
+        "created_at": r.created_at,
+    }
+
+
+@router.delete("/tool-runs/{run_id}", status_code=204)
+async def delete_tool_run(repo: ReadyRepoDep, session: SessionDep, run_id: str) -> None:
+    r = await session.get(ToolRun, run_id)
+    if r is None or r.repo_id != repo.id:
+        raise HTTPException(404, "run not found")
+    await session.delete(r)
+    await session.commit()
+
+
 @router.post("/debug")
 async def debug(repo: ReadyRepoDep, rg: GraphDep, session: SessionDep, body: DebugRequest) -> dict[str, Any]:
-    return await reasoning.debug(session, AnalysisContext(repo, rg), body.error, body.description)
+    out = await reasoning.debug(session, AnalysisContext(repo, rg), body.error, body.description)
+    return await _saved(session, repo, "debug", _title(body.error), body.model_dump(), out)
 
 
 @router.post("/impact")
@@ -171,7 +254,7 @@ async def impact(repo: ReadyRepoDep, rg: GraphDep, session: SessionDep, body: Im
     )
     if "error" in out:
         raise HTTPException(404, out["error"])
-    return out
+    return await _saved(session, repo, "impact", body.change[:120], body.model_dump(), out)
 
 
 @router.post("/feature")
@@ -182,17 +265,21 @@ async def feature(
     body: FeatureRequest,
     mode: str = Query("simulate", pattern="^(simulate|plan)$"),
 ) -> dict[str, Any]:
-    return await reasoning.plan_feature(session, AnalysisContext(repo, rg), body.description, mode=mode)
+    out = await reasoning.plan_feature(session, AnalysisContext(repo, rg), body.description, mode=mode)
+    tool = "plan" if mode == "plan" else "feature"
+    return await _saved(session, repo, tool, _title(body.description), body.model_dump(), out)
 
 
 @router.post("/plan")
 async def plan(repo: ReadyRepoDep, rg: GraphDep, session: SessionDep, body: FeatureRequest) -> dict[str, Any]:
-    return await reasoning.plan_feature(session, AnalysisContext(repo, rg), body.description, mode="plan")
+    out = await reasoning.plan_feature(session, AnalysisContext(repo, rg), body.description, mode="plan")
+    return await _saved(session, repo, "plan", _title(body.description), body.model_dump(), out)
 
 
 @router.post("/advise")
 async def advise(repo: ReadyRepoDep, rg: GraphDep, session: SessionDep, body: AdviseRequest) -> dict[str, Any]:
-    return await reasoning.advise(session, AnalysisContext(repo, rg), body.question)
+    out = await reasoning.advise(session, AnalysisContext(repo, rg), body.question)
+    return await _saved(session, repo, "advise", _title(body.question), body.model_dump(), out)
 
 
 @router.post("/refactor")
@@ -204,7 +291,7 @@ async def refactor(
     )
     if "error" in out:
         raise HTTPException(404, out["error"])
-    return out
+    return await _saved(session, repo, "refactor", "", body.model_dump() if body else {}, out)
 
 
 @router.post("/tests/generate")
@@ -212,7 +299,7 @@ async def generate_tests(repo: ReadyRepoDep, rg: GraphDep, session: SessionDep, 
     out = await reasoning.generate_tests(session, AnalysisContext(repo, rg), body.node_id)
     if "error" in out:
         raise HTTPException(404, out["error"])
-    return out
+    return await _saved(session, repo, "tests", "", body.model_dump(), out)
 
 
 @router.post("/review")
@@ -220,9 +307,10 @@ async def review(repo: ReadyRepoDep, rg: GraphDep, session: SessionDep, body: Re
     out = await reasoning.review(session, AnalysisContext(repo, rg), body.diff, body.title)
     if "error" in out:
         raise HTTPException(400, out["error"])
-    return out
+    return await _saved(session, repo, "review", body.title or _title(body.diff), body.model_dump(), out)
 
 
 @router.post("/logs")
 async def logs(repo: ReadyRepoDep, rg: GraphDep, session: SessionDep, body: LogsRequest) -> dict[str, Any]:
-    return await reasoning.incident(session, AnalysisContext(repo, rg), body.logs, body.description)
+    out = await reasoning.incident(session, AnalysisContext(repo, rg), body.logs, body.description)
+    return await _saved(session, repo, "logs", body.description[:120] or _title(body.logs), body.model_dump(), out)

@@ -573,3 +573,62 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
 - **Consequences:**
   - `RepoOut.summary` is optional and is filled only by the list endpoint.
   - The duplicate "ArchonAI" entry already in the database needs a one-off merge: move its conversations and documents to the newer entry, then remove the old one. This step waits for the owner's approval.
+
+## D-034 — Workflow round: automatic audit, health trend, freshness, quick jump, repo switcher, tool history, streaming chat
+- **Date:** 2026-10-18
+- **Status:** Accepted
+- **Context:** The owner asked for nine follow-ups from the homepage review. Most repositories showed "not audited yet". The npm audit listed 10 advisories. There was no way to see whether health improves, whether a repository changed since its analysis, to jump anywhere quickly, to switch repositories in place, to reopen a tool's result, or to watch a chat answer arrive.
+- **Decision:**
+  - **Automatic audit:**
+    - `ingest_repository` runs every static analyzer (an `AnalysisRun`, then a health snapshot) right after indexing.
+    - It makes no AI calls and takes seconds.
+    - The `ARCHON_AUTO_ANALYZE` setting (default on) turns it off.
+  - **Health trend:**
+    - `RepoSummary.health_history` holds the last 12 scores.
+    - Each card draws a 44 px line, green if the score went up, rose if down, grey if flat.
+  - **Freshness:**
+    - Ingestion stores `stats.fingerprint`, a SHA-1 of (path, size, mtime) for every scanned file. It uses stat calls only, no reads.
+    - `GET /repos/freshness` compares:
+      - local folders: against a fresh fingerprint;
+      - git URLs: the analyzed commit against `git ls-remote` with an 8 s timeout and no credential prompt.
+    - `changed` is null when it cannot tell. Results are cached for 60 s, and the cache is cleared on re-analysis.
+    - The homepage asks once per visit. Cards then show "Changed · re-analyze" in place of the age.
+  - **Quick jump** (`CommandPalette.tsx`, Ctrl/⌘ + K or the "Jump to…" button):
+    - Covers sections of the current repository, every tool (deep link `?tool=`), other repositories, any file, function or endpoint (graph search, opening the map on that node), and "Add a repository".
+    - Uses subsequence matching with word-start bonuses, and full keyboard control.
+    - It is mounted by the home page and RepoShell rather than the root layout, so the owner's uncommitted layout change is untouched. Those are the only two page shells.
+  - **Repository switcher:** the name in the repository header opens a list of repositories. Picking one keeps the current tab and drops the old repository's query string.
+  - **Tool history:**
+    - New `tool_runs` table with tool, title, trimmed inputs (≤ 20k characters per field) and the JSON result.
+    - Every Tools endpoint saves its run and returns `run_id`. The newest 30 per tool and repository are kept.
+    - `GET/DELETE /repos/{id}/tool-runs[/{run_id}]`.
+    - The Tools page shows "Recent runs". Opening one restores the result and puts its input back in the form.
+  - **Streaming chat:**
+    - `LLMProvider.stream()`:
+      - native for Groq and xAI (OpenAI-compatible `stream=True`) and Gemini (`generate_content_stream`);
+      - one piece for providers without native streaming.
+    - `FallbackChain.stream()` tries links until one produces its first piece within the timeout. From then on the answer stays with that link, and a later failure ends it with a note.
+    - `POST /repos/{id}/chat/stream` returns NDJSON events: `sources`, `delta`… then `done`.
+    - Reads happen before the response starts. Messages are saved with a fresh session at the end, because FastAPI closes the request session before a streamed body runs.
+    - The chat UI renders the answer as it grows.
+  - **Citations open the map** (`chat/citations.ts`): these become links to the cited node (when lines match) or to the file (`?prefix=`):
+    - `[path:lines]` with any dash style;
+    - `` `path:lines` `` in backticks;
+    - plain mentions of a cited file's name.
+    - Code blocks are left alone.
+  - **npm advisories:** 10 → 5.
+    - `npm audit fix` updated sharp and source-map-js.
+    - Vitest went 3 → 5 (dev only), which closed the critical tinypool and the vitest/mocker advisories. `@types/node` went to 22 to match.
+    - The remaining 5 (high) are one chain, `eslint-config-next → fast-glob → micromatch → braces`. They run only while linting our own files. No patched `braces` exists, and npm's "fix" would downgrade the Next 16 lint config to 14, so it is left until upstream ships a fix.
+- **Alternatives considered:**
+  - Tool history in localStorage: lost on another browser, and inputs like logs can be megabytes.
+  - Server-Sent Events for chat: NDJSON over a POST fetch is simpler (no EventSource GET limits) and carries the same events.
+  - Streaming by re-chunking a finished answer: no faster first word, so no real benefit.
+  - Watching folders for changes (file watchers): constant cost and platform quirks; a fingerprint checked on visit is enough.
+  - Mounting the palette in the root layout: cleaner, but it would have mixed with the owner's uncommitted layout edit.
+- **Why this one:** each item removes a step the owner had to take by hand (open Audit, compare scores, guess staleness, navigate, re-run a tool, wait for a whole answer) using data ARCHON already has, with small, testable pieces.
+- **Consequences:**
+  - Ingestion takes a few seconds longer while it audits.
+  - New table `tool_runs`, created by `create_all` at startup.
+  - `/repos/freshness` may take up to 8 s for unreachable remotes. It is only called once per homepage visit.
+  - The non-streaming `POST /chat` stays for API users and tests.

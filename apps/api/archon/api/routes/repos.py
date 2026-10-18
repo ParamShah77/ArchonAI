@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from sqlalchemy import func, select
@@ -9,6 +13,7 @@ from archon.api.deps import RepoDep, SessionDep
 from archon.api.schemas import RepoCreate, RepoOut, RepoSummary
 from archon.db.models import AnalysisRun, Conversation, FindingRow, HealthSnapshot, Repository
 from archon.graph.query import graph_cache
+from archon.ingest.freshness import remote_head, tree_fingerprint
 from archon.ingest.workspace import is_git_url, remove_checkout, source_key
 from archon.services.ingest import ingest_repository
 
@@ -19,8 +24,6 @@ router = APIRouter(prefix="/repos", tags=["repositories"])
 async def create_repo(body: RepoCreate, session: SessionDep, tasks: BackgroundTasks) -> Repository:
     source = body.source.strip()
     if not is_git_url(source):
-        from pathlib import Path
-
         if not Path(source).expanduser().is_dir():
             raise HTTPException(400, "source must be a git URL or an existing local directory")
     # the same repository added again (any spelling) refreshes the existing entry instead of duplicating it,
@@ -32,6 +35,7 @@ async def create_repo(body: RepoCreate, session: SessionDep, tasks: BackgroundTa
                 existing.status = "pending"
                 await session.commit()
                 graph_cache.invalidate(existing.id)
+                _fresh_cache.pop(existing.id, None)
                 tasks.add_task(ingest_repository, existing.id)
             return existing
     repo = Repository(
@@ -84,20 +88,16 @@ async def _summaries(session: SessionDep) -> dict[str, RepoSummary]:
         s = get(rid)
         s.open_by_severity[sev] = n
         s.open_findings += n
-    latest = (
-        select(HealthSnapshot.repo_id, func.max(HealthSnapshot.created_at).label("at"))
-        .group_by(HealthSnapshot.repo_id)
-        .subquery()
-    )
     snaps = await session.execute(
-        select(HealthSnapshot).join(
-            latest, (HealthSnapshot.repo_id == latest.c.repo_id) & (HealthSnapshot.created_at == latest.c.at)
+        select(HealthSnapshot.repo_id, HealthSnapshot.score, HealthSnapshot.breakdown).order_by(
+            HealthSnapshot.created_at
         )
     )
-    for snap in snaps.scalars():
-        s = get(snap.repo_id)
-        s.health_score = round(snap.score, 1)
-        s.health_grade = str((snap.breakdown or {}).get("grade", ""))
+    for rid, score, breakdown in snaps:
+        s = get(rid)
+        s.health_history = [*s.health_history[-11:], round(score, 1)]
+        s.health_score = round(score, 1)
+        s.health_grade = str((breakdown or {}).get("grade", ""))
     runs = await session.execute(
         select(AnalysisRun.repo_id, func.max(AnalysisRun.finished_at))
         .where(AnalysisRun.status == "done")
@@ -115,6 +115,35 @@ async def _summaries(session: SessionDep) -> dict[str, RepoSummary]:
     return out
 
 
+_fresh_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+@router.get("/freshness")
+async def freshness(session: SessionDep) -> dict[str, dict[str, Any]]:
+    """Which repositories changed since they were analyzed (decisions.md D-034). Cached for a minute."""
+    repos = [r for r in (await session.execute(select(Repository))).scalars() if r.status == "ready"]
+
+    def check(r: Repository) -> dict[str, Any]:
+        hit = _fresh_cache.get(r.id)
+        if hit and time.monotonic() - hit[0] < 60:
+            return hit[1]
+        if is_git_url(r.source):
+            head = remote_head(r.source, r.default_branch)
+            out = {"changed": None if head is None else head != r.commit_sha, "detail": "new commits on the remote"}
+        else:
+            root = Path(r.local_path or r.source)
+            fp = (r.stats or {}).get("fingerprint")
+            out = {
+                "changed": None if not fp or not root.is_dir() else tree_fingerprint(root) != fp,
+                "detail": "files changed in the folder",
+            }
+        _fresh_cache[r.id] = (time.monotonic(), out)
+        return out
+
+    results = await asyncio.gather(*(asyncio.to_thread(check, r) for r in repos))
+    return {r.id: res for r, res in zip(repos, results, strict=True)}
+
+
 @router.get("/{repo_id}", response_model=RepoOut)
 async def get_repo(repo: RepoDep) -> Repository:
     return repo
@@ -127,6 +156,7 @@ async def reingest(repo: RepoDep, session: SessionDep, tasks: BackgroundTasks) -
     repo.status = "pending"
     await session.commit()
     graph_cache.invalidate(repo.id)
+    _fresh_cache.pop(repo.id, None)
     tasks.add_task(ingest_repository, repo.id)
     return repo
 

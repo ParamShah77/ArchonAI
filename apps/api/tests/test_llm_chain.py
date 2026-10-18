@@ -144,3 +144,17 @@ def test_groq_learns_limits_and_recovers_rejected_json():
     assert _failed_generation(err) == '{"summary": "x"} trailing'
     other = BadRequestError("bad", response=httpx.Response(400, request=req), body={"error": {"code": "x"}})
     assert _failed_generation(other) is None
+
+
+async def test_stream_uses_the_first_link_that_starts_answering():
+    a, b = Fake("groq", "m1", "fail"), Fake("gemini", "m2", "ok")
+    chain = FallbackChain([a, b])
+    pieces = [p async for p in chain.stream(MSG)]
+    assert "".join(pieces) == "answer from gemini"
+    assert last_answered_by.get() == "gemini:m2"
+
+
+async def test_stream_raises_when_every_link_fails():
+    chain = FallbackChain([Fake("groq", "m1", "fail")])
+    with pytest.raises(LLMError):
+        _ = [p async for p in chain.stream(MSG)]

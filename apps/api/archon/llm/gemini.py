@@ -8,6 +8,8 @@ models that reject it.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -93,6 +95,32 @@ class GeminiProvider(LLMProvider):
             finish = resp.candidates[0].finish_reason if resp.candidates else None
             raise LLMError(f"Gemini {self.model} returned no text (finish_reason={finish})")
         return text
+
+    async def stream(
+        self, messages: list[Message], *, system: str = "", temperature: float = 0.2, max_tokens: int = 4096
+    ) -> AsyncIterator[str]:
+        contents = [
+            types.Content(role="user" if m.role == "user" else "model", parts=[types.Part(text=m.content)])
+            for m in messages
+        ]
+
+        async def start() -> AsyncIterator[types.GenerateContentResponse]:
+            return await self.client.aio.models.generate_content_stream(
+                model=self.model, contents=contents, config=self._config(system, temperature, max_tokens, False)
+            )
+
+        try:
+            it = await start()
+        except genai_errors.ClientError as e:
+            # Older/other models reject thinking_level: remember that and retry once without it.
+            if self._thinking_supported and getattr(e, "code", None) == 400 and "thinking" in str(e).lower():
+                self._thinking_supported = False
+                it = await start()
+            else:
+                raise
+        async for chunk in it:
+            if chunk.text:
+                yield chunk.text
 
     @retry(
         retry=retry_if_exception(_server_error),

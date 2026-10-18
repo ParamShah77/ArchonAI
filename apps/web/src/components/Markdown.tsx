@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -16,7 +17,12 @@ export function Markdown({ children }: { children: string }) {
           ul: ({ children }) => <ul className="list-disc pl-5 text-sm space-y-0.5 mb-2">{children}</ul>,
           ol: ({ children }) => <ol className="list-decimal pl-5 text-sm space-y-0.5 mb-2">{children}</ol>,
           li: ({ children }) => <li className="text-fg/90">{children}</li>,
-          a: ({ children, href }) => <a href={href} className="text-accent hover:underline">{children}</a>,
+          a: ({ children, href }) =>
+            href?.startsWith("/") ? (
+              <Link href={href} className="text-accent hover:underline mono text-[12px]" title="Open on the code map">{children}</Link>
+            ) : (
+              <a href={href} className="text-accent hover:underline" target="_blank" rel="noreferrer">{children}</a>
+            ),
           code: ({ children, className }) => {
             const block = typeof className === "string" && className.startsWith("language-");
             if (block) return <code className="mono text-[11px]">{children}</code>;

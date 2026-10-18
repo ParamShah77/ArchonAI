@@ -3,25 +3,16 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import clsx from "clsx";
-import { Bug, Compass, FlaskConical, GitPullRequest, Hammer, Lightbulb, ListChecks, ScrollText, Target } from "lucide-react";
-import { api, type AIResult, type GraphNode } from "@/lib/api";
-import { useDebounced } from "@/lib/hooks";
+import { History, Trash2 } from "lucide-react";
+import { api, type AIResult, type GraphNode, type ToolRunInfo } from "@/lib/api";
+import { useApi, useDebounced } from "@/lib/hooks";
+import { timeAgo } from "@/lib/time";
 import { useRepo } from "@/components/RepoShell";
 import { JsonView } from "@/components/JsonView";
 import { Sources } from "@/components/chat/ChatPanel";
 import { ErrorBox, KindBadge, Section, Spinner } from "@/components/ui";
 
-const TOOLS = [
-  { id: "debug", label: "Debug", icon: Bug, blurb: "Paste an error, stack trace or log line. ARCHON maps frames to code, traces the execution path and proposes a root cause and fix." },
-  { id: "impact", label: "Change impact", icon: Target, blurb: "Pick a function, class, file or table. See every dependent, endpoint, table and test that could break, with a risk score." },
-  { id: "feature", label: "Feature simulator", icon: Lightbulb, blurb: "Describe a feature in plain language. ARCHON identifies which components, files, tables and APIs would need to change." },
-  { id: "plan", label: "Engineering plan", icon: ListChecks, blurb: "Turn a requirement into an implementation plan: files, DB/API changes, tests, security, deployment, complexity estimate." },
-  { id: "advise", label: "Architecture advisor", icon: Compass, blurb: "Ask 'What should I change to support 10× more users?' and get recommendations with trade-offs grounded in this codebase." },
-  { id: "refactor", label: "Refactoring", icon: Hammer, blurb: "Get safe restructuring proposals for the hottest debt spot (or a chosen file/symbol), aware of its dependents." },
-  { id: "tests", label: "Test generation", icon: FlaskConical, blurb: "Generate test cases and a test file for a function, using its callers/callees to decide what to mock." },
-  { id: "review", label: "Code review", icon: GitPullRequest, blurb: "Paste a unified diff. Changed symbols are mapped to the graph, checked against rules, and reviewed for regressions and side effects." },
-  { id: "logs", label: "Incident & logs", icon: ScrollText, blurb: "Paste application logs. ARCHON clusters messages, builds a timeline, links errors to code and explains the probable root cause." },
-] as const;
+import { TOOLS } from "./toolList";
 type ToolId = (typeof TOOLS)[number]["id"];
 
 export function ToolsPanel() {
@@ -55,6 +46,7 @@ export function ToolsPanel() {
 
 function useRun() {
   const [result, setResult] = useState<AIResult | null>(null);
+  const [done, setDone] = useState(0); // bumps after every finished run (refreshes the history)
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const run = useCallback(async (fn: () => Promise<AIResult>) => {
@@ -62,13 +54,14 @@ function useRun() {
     setError(null);
     try {
       setResult(await fn());
+      setDone((d) => d + 1);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   }, []);
-  return { result, error, busy, run };
+  return { result, error, busy, run, done, setResult };
 }
 
 function NodePicker({ value, onChange, kinds }: { value: GraphNode | null; onChange: (n: GraphNode | null) => void; kinds?: string }) {
@@ -132,7 +125,7 @@ function RunButton({ busy, label, disabled }: { busy: boolean; label: string; di
 function ToolForm({ tool }: { tool: ToolId }) {
   const { repo } = useRepo();
   const sp = useSearchParams();
-  const { result, error, busy, run } = useRun();
+  const { result, error, busy, run, done, setResult } = useRun();
   const [text, setText] = useState("");
   const [extra, setExtra] = useState("");
   const [node, setNode] = useState<GraphNode | null>(null);
@@ -191,8 +184,75 @@ function ToolForm({ tool }: { tool: ToolId }) {
         )}
         <RunButton busy={busy} label={{ debug: "Find root cause", impact: "Analyze impact", feature: "Simulate feature", plan: "Create plan", advise: "Get recommendations", refactor: "Propose refactoring", tests: "Generate tests", review: "Review change", logs: "Analyze incident" }[tool]} disabled={(tool === "impact" || tool === "tests") && !node} />
       </form>
+      <RecentRuns
+        tool={tool}
+        refreshKey={done}
+        openId={(result?.run_id as string | undefined) ?? null}
+        onOpen={(r) => {
+          setResult(r.result);
+          // put the question back in the form, so it can be edited and run again
+          const i = r.inputs;
+          const main = i.error ?? i.description ?? i.question ?? i.diff ?? i.logs;
+          if (typeof main === "string") setText(main);
+          const second = tool === "review" ? i.title : tool === "impact" ? i.change : i.description;
+          if (typeof second === "string" && tool !== "feature" && tool !== "plan") setExtra(second);
+          if (typeof i.node_id === "string") api.graph.node(repo.id, i.node_id).then((d) => setNode(d.node)).catch(() => {});
+        }}
+      />
       {error && <ErrorBox>{error}</ErrorBox>}
       {tool === "impact" && result ? <ImpactResult r={result} /> : tool === "review" && result ? <ReviewResult r={result} /> : tool === "logs" && result ? <LogsResult r={result} /> : <Result r={result} />}
+    </div>
+  );
+}
+
+/** Earlier runs of this tool on this repository (kept on the server, newest first). */
+function RecentRuns({
+  tool,
+  refreshKey,
+  openId,
+  onOpen,
+}: {
+  tool: ToolId;
+  refreshKey: number;
+  openId: string | null;
+  onOpen: (r: ToolRunInfo & { inputs: Record<string, unknown>; result: AIResult }) => void;
+}) {
+  const { repo } = useRepo();
+  const [extra, setExtra] = useState(0);
+  const { data: runs } = useApi(`tool-runs:${repo.id}:${tool}:${refreshKey}:${extra}`, () => api.tools.runs(repo.id, tool));
+  const [all, setAll] = useState(false);
+  if (!runs?.length) return null;
+  const shown = all ? runs : runs.slice(0, 5);
+  return (
+    <div className="card px-3 py-2">
+      <div className="flex items-center gap-2 text-xs text-muted mb-1">
+        <History size={13} /> Recent runs
+        <span className="text-faint">· {runs.length}</span>
+        {runs.length > 5 && (
+          <button className="ml-auto text-faint hover:text-fg" onClick={() => setAll((a) => !a)}>{all ? "show fewer" : "show all"}</button>
+        )}
+      </div>
+      <ul className="divide-y divide-line">
+        {shown.map((r) => (
+          <li key={r.id} className={clsx("group flex items-center gap-2 py-1 text-xs", r.id === openId && "text-accent")}>
+            <button
+              className="flex-1 min-w-0 text-left truncate hover:text-fg"
+              title="Open this result"
+              onClick={() => api.tools.run(repo.id, r.id).then(onOpen)}
+            >
+              {r.title || "(untitled)"}
+            </button>
+            <span className="text-faint shrink-0">{timeAgo(r.created_at)}</span>
+            <button
+              className="opacity-0 group-hover:opacity-100 text-faint hover:text-danger shrink-0"
+              title="Forget this run"
+              onClick={() => api.tools.removeRun(repo.id, r.id).then(() => setExtra((x) => x + 1))}
+            >
+              <Trash2 size={12} />
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

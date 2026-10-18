@@ -127,4 +127,49 @@ async def test_adding_the_same_repo_twice_refreshes_it(client: AsyncClient, fixt
     repos = (await client.get("/repos")).json()
     assert [r["id"] for r in repos].count(first["id"]) == 1
     summary = next(r for r in repos if r["id"] == first["id"])["summary"]
-    assert summary["open_findings"] == 0 and summary["last_activity_at"]
+    assert summary["last_activity_at"]
+
+
+async def test_audit_runs_after_ingest_and_freshness_notices_edits(
+    client: AsyncClient, fixture_repo: Path, tmp_path: Path
+):
+    import shutil
+
+    src = tmp_path / "copy"
+    shutil.copytree(fixture_repo, src)
+    repo = await _ingest(client, str(src))
+    rid = repo["id"]
+    # the automatic audit finishes in the same background task, shortly after "ready"
+    for _ in range(100):
+        summary = next(r for r in (await client.get("/repos")).json() if r["id"] == rid)["summary"]
+        if summary["last_analysis_at"]:
+            break
+        await asyncio.sleep(0.1)
+    assert summary["last_analysis_at"] and summary["health_grade"] and summary["health_history"]
+
+    assert (await client.get("/repos/freshness")).json()[rid]["changed"] is False
+    edited = next(src.rglob("*.py"))
+    edited.write_text(edited.read_text(encoding="utf-8") + "# edited" + chr(10), encoding="utf-8")
+    from archon.api.routes.repos import _fresh_cache
+
+    _fresh_cache.clear()
+    assert (await client.get("/repos/freshness")).json()[rid]["changed"] is True
+
+
+async def test_tool_runs_are_kept_and_can_be_reopened(client: AsyncClient, fixture_repo: Path):
+    repo = await _ingest(client, str(fixture_repo))
+    rid = repo["id"]
+    trace = "\n".join(
+        [
+            "Traceback (most recent call last):",
+            '  File "app/services/orders.py", line 3, in place_order',
+            "ValueError: bad",
+        ]
+    )
+    out = (await client.post(f"/repos/{rid}/debug", json={"error": trace})).json()
+    assert out["run_id"]
+    runs = (await client.get(f"/repos/{rid}/tool-runs", params={"tool": "debug"})).json()
+    assert runs[0]["id"] == out["run_id"] and runs[0]["title"].startswith("Traceback")
+    full = (await client.get(f"/repos/{rid}/tool-runs/{out['run_id']}")).json()
+    assert full["inputs"]["error"] == trace and full["result"]
+    assert (await client.delete(f"/repos/{rid}/tool-runs/{out['run_id']}")).status_code == 204

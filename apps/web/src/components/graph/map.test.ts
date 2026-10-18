@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Graph, GraphEdge, GraphNode } from "@/lib/api";
 import { runLayout, type LayoutEdge } from "./layoutCore";
+import { linkCitations } from "../chat/citations";
 import { buildGraphData, makeSimulation, seedPositions } from "./forceData";
 import { buildMapModel } from "./mapModel";
 import { fitParts, fitSmart, type FontSpec } from "./mapText";
@@ -226,5 +227,27 @@ describe("graph view data", () => {
     const dist = (p: string, q: string) => Math.hypot(a.get(p)!.x! - a.get(q)!.x!, a.get(p)!.y! - a.get(q)!.y!);
     // a file's own function sits closer to it than the other file does
     expect(dist(ids.f.id, ids.entry.id)).toBeLessThan(dist(ids.f.id, ids.h.id));
+  });
+});
+
+describe("chat citations", () => {
+  const src = (path: string, start: number, end: number, node_id: string) =>
+    ({ path, start_line: start, end_line: end, node_id, kind: "function", name: "x", why: "", score: 1 }) as never;
+  const sources = [src("app/text_palette.py", 280, 310, "N1"), src("app/image.py", 1, 50, "N2")];
+
+  it("links [path:lines] to the node that holds those lines", () => {
+    expect(linkCitations("see [app/text_palette.py:290-301].", "R", sources)).toContain("(/repos/R/map?focus=N1&node=N1)");
+  });
+
+  it("links file names in prose and in backticks, with any dash style, but not inside code blocks", () => {
+    const block = ["```", "image.py", "```"].join("\n");
+    const out = linkCitations(`text_palette.py – fn [290‑301] and \`image.py:3‑9\`\n${block}`, "R", sources);
+    expect(out).toContain("[text_palette.py](/repos/R/map?prefix=app%2Ftext_palette.py)");
+    expect(out).toContain("[`image.py:3‑9`](/repos/R/map?focus=N2&node=N2)");
+    expect(out).toContain(block);
+  });
+
+  it("leaves unknown files alone", () => {
+    expect(linkCitations("see other.py", "R", sources)).toBe("see other.py");
   });
 });
