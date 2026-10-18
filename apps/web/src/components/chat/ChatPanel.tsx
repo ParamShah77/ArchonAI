@@ -137,7 +137,6 @@ export function ChatPanel() {
                 ) : (
                   <div className="flex items-center gap-2 text-muted text-sm"><Spinner /> Reading the code graph…</div>
                 )}
-                {m.answered_by && <div className="mt-2 text-[11px] text-faint mono">answered by {m.answered_by}</div>}
               </div>
               {m.sources?.length > 0 && <Sources repoId={repo.id} sources={m.sources} />}
             </div>

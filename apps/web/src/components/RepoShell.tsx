@@ -44,7 +44,7 @@ export function RepoShell({ id, children }: { id: string; children: ReactNode })
       <CommandPalette />
       <div className="border-b border-line bg-elev/60 px-6">
         <div className="flex items-center gap-3 pt-4">
-          <Link href="/" className="text-faint hover:text-fg text-sm">Repositories</Link>
+          <Link href="/repos" className="text-faint hover:text-fg text-sm">Repositories</Link>
           <span className="text-faint">/</span>
           <RepoSwitcher repo={repo} section={pathname.slice(base.length)} />
           <StatusPill status={repo.status} />
@@ -142,7 +142,7 @@ function RepoSwitcher({ repo, section }: { repo: Repo; section: string }) {
             </Link>
           ))}
           <div className="border-t border-line mt-1 pt-1">
-            <Link href="/" onClick={() => setOpen(false)} className="block px-3 py-1.5 text-sm text-muted hover:bg-elev2 hover:text-fg">
+            <Link href="/repos" onClick={() => setOpen(false)} className="block px-3 py-1.5 text-sm text-muted hover:bg-elev2 hover:text-fg">
               All repositories…
             </Link>
           </div>

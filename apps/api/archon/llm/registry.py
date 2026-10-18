@@ -122,6 +122,15 @@ def stream(
     return get_chain().stream(messages, system=system, temperature=temperature, max_tokens=max_tokens)
 
 
+AI_NOT_CONFIGURED = "AI answers are not set up on this server yet. Add an AI API key to the .env file."
+AI_UNAVAILABLE = "The AI service did not answer this time (it may be busy). Please try again in a minute."
+
+
+def public_error(_e: BaseException | None = None) -> str:
+    """The text shown to people when an AI step fails; provider and model names stay in the server log."""
+    return AI_UNAVAILABLE if llm_available() else AI_NOT_CONFIGURED
+
+
 async def complete_json(prompt: str, *, system: str = "", temperature: float = 0.1, max_tokens: int = 4096) -> Any:
     chain = get_chain()
     text = await chain.complete(

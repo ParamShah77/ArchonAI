@@ -13,7 +13,7 @@ from archon.db.models import ArchitectureReport, Repository
 from archon.db.session import end_read
 from archon.graph.model import EdgeKind, NodeKind
 from archon.graph.query import RepoGraph
-from archon.llm import LLMError, complete_json, llm_available
+from archon.llm import AI_NOT_CONFIGURED, AI_UNAVAILABLE, LLMError, complete_json, llm_available, public_error
 from archon.llm.chain import last_answered_by
 
 log = logging.getLogger("archon.architecture")
@@ -172,7 +172,12 @@ Reconstruct the probable architecture. Return JSON with exactly these keys:
 async def reconstruct(session: AsyncSession, repo: Repository, rg: RepoGraph, refresh: bool = False) -> dict[str, Any]:
     cached = await session.get(ArchitectureReport, repo.id)
     if cached is not None and not refresh and cached.report.get("ai") is not None:
-        return cached.report
+        report = dict(cached.report)
+        # reports saved before D-035 may carry provider error text; show the neutral message instead
+        if report.get("ai_error") not in (None, AI_NOT_CONFIGURED, AI_UNAVAILABLE):
+            report["ai_error"] = AI_UNAVAILABLE
+        report.pop("ai_model", None)
+        return report
     report = heuristic_report(repo, rg)
     await end_read(session)  # do not hold a read snapshot across the LLM call (D-019)
     if llm_available():
@@ -181,9 +186,9 @@ async def reconstruct(session: AsyncSession, repo: Repository, rg: RepoGraph, re
             report["ai_model"] = last_answered_by.get() or None
         except (LLMError, Exception) as e:  # noqa: BLE001 - keep heuristic output usable
             log.warning("architecture LLM step failed: %s", e)
-            report["ai_error"] = f"{type(e).__name__}: {e}"
+            report["ai_error"] = public_error(e)
     else:
-        report["ai_error"] = "No LLM provider configured (set GEMINI_API_KEY, GROQ_API_KEY or XAI_API_KEY)."
+        report["ai_error"] = AI_NOT_CONFIGURED
     cached = await session.get(ArchitectureReport, repo.id)
     if cached is None:
         session.add(ArchitectureReport(repo_id=repo.id, report=report))

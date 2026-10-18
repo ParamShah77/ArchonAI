@@ -74,9 +74,11 @@ GET /repos/{id}/architecture
 
 ### 3.4 Web app (Phase 1)
 ```
-apps/web/src/app/layout.tsx            shell: header + <ApiStatus/> (polls GET /health every 15s; shown only when offline / AI off)
+apps/web/src/app/layout.tsx            shell: <SiteHeader/> (website nav on /, app bar + <ApiStatus/> elsewhere; GET /health
+                                         every 15s, chip only when offline / AI off)
   (every page shell)                   <CommandPalette/>: Ctrl/⌘+K -> repos, sections, tools, GET /repos/{id}/search
-  /                                    page.tsx -> <RepoList/>: GET /repos (with summary; polled every 1.5 s while an
+  /                                    page.tsx -> static landing page (website; no requests) -> "Open ARCHON" -> /repos (D-035)
+  /repos                               repos/page.tsx -> <RepoList/>: GET /repos (with summary; polled every 1.5 s while an
                                          analysis runs) -> <RepoCard/> per repository; add -> POST /repos (an existing
                                          source key returns that entry and re-analyzes it) (D-033); GET /repos/freshness
                                          once per visit -> "Changed · re-analyze" (D-034)
@@ -238,6 +240,20 @@ Bash tool call in Claude Code
 ---
 
 ## Session changelog
+
+### Session 2026-10-18 (night) — Website at `/`, app at `/repos`, no provider names (decision D-035)
+- Web:
+  - New `app/page.tsx` (landing: `Preview`, `Feature`, `Step`, `Tool`, `Trust`, `SectionTitle`).
+  - New `app/repos/page.tsx` (the repository list moved here).
+  - New `components/SiteHeader.tsx` (`SiteHeader`, `Logo`), used by `layout.tsx`.
+  - Links now go to `/repos`: `RepoShell.tsx`, `CommandPalette.tsx`.
+  - Model names are no longer shown: `ChatPanel.tsx`, `ToolsPanel.tsx`, `RepoOverview.tsx`. `ApiStatus.tsx` has neutral wording.
+- API:
+  - `llm/registry.py`: `AI_NOT_CONFIGURED`, `AI_UNAVAILABLE`, `public_error`, exported from `archon.llm`.
+  - These are used in `services/chat.py`, `services/reasoning.py` (`_llm_json`) and `services/architecture.py`. Cached reports are cleaned when served.
+  - `routes/repos.py`: the trend uses only scores from the first audit on.
+- Tests: `test_api.py` asserts the neutral message (46 backend, 17 web).
+- Verified: the landing page at 1100×750 and 375×812 (no sideways scroll); `/repos` shows the app bar.
 
 ### Session 2026-10-18 (evening) — Automatic audit, trend, freshness, quick jump, switcher, tool history, streaming chat (decision D-034)
 - Duplicate ArchonAI merge:

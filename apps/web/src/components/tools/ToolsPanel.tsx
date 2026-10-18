@@ -106,9 +106,9 @@ function Result({ r, factsTitle = "Structural analysis", facts }: { r: AIResult 
   if (!r) return null;
   return (
     <div className="space-y-4">
-      {r.ai_error && !r.ai && <div className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn">AI step unavailable: {r.ai_error}. The structural analysis below is still exact.</div>}
+      {r.ai_error && !r.ai && <div className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn">{r.ai_error} The structural analysis below is still exact.</div>}
       {r.ai && (
-        <Section title="AI analysis" action={r.ai_model ? <span className="text-[11px] text-faint mono">{r.ai_model}</span> : undefined}>
+        <Section title="AI analysis">
           <JsonView data={r.ai} />
         </Section>
       )}

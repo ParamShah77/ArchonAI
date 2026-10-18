@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from archon.llm.base import LLMError, LLMProvider, Message
 from archon.llm.registry import (
+    AI_NOT_CONFIGURED,
+    AI_UNAVAILABLE,
     complete,
     complete_json,
     embed,
@@ -15,10 +17,13 @@ from archon.llm.registry import (
     get_provider,
     llm_available,
     llm_status,
+    public_error,
     stream,
 )
 
 __all__ = [
+    "AI_NOT_CONFIGURED",
+    "AI_UNAVAILABLE",
     "LLMError",
     "LLMProvider",
     "Message",
@@ -30,5 +35,6 @@ __all__ = [
     "get_provider",
     "llm_available",
     "llm_status",
+    "public_error",
     "stream",
 ]

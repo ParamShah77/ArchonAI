@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -13,8 +14,10 @@ from archon.db.models import ChatMessage, Conversation, Repository
 from archon.db.session import end_read, session_factory
 from archon.graph.model import NodeKind
 from archon.graph.query import RepoGraph
-from archon.llm import LLMError, Message, complete, llm_available, stream
+from archon.llm import LLMError, Message, complete, llm_available, public_error, stream
 from archon.llm.chain import last_answered_by
+
+log = logging.getLogger("archon.chat")
 
 SYSTEM = (
     "You are ARCHON, an engineering intelligence assistant with access to a code graph and source excerpts "
@@ -102,13 +105,10 @@ async def ask(
             answer = await complete(prompt, system=SYSTEM, history=history, max_tokens=2048)
             answered_by = last_answered_by.get()
         except LLMError as e:
-            answer = f"LLM error: {e}"
+            log.warning("chat answer failed: %s", e)
+            answer = public_error(e)
     else:
-        answer = (
-            "No LLM provider is configured, so I cannot compose an answer. The most relevant code for your "
-            "question is listed in the sources below (ranked by keyword relevance). "
-            "Set GEMINI_API_KEY (or GROQ/XAI) to enable answers."
-        )
+        answer = NO_LLM
     if conv is None:
         conv = Conversation(repo_id=repo.id, title=question[:120])
         session.add(conv)
@@ -120,9 +120,8 @@ async def ask(
 
 
 NO_LLM = (
-    "No LLM provider is configured, so I cannot compose an answer. The most relevant code for your "
-    "question is listed in the sources below (ranked by keyword relevance). "
-    "Set GEMINI_API_KEY (or GROQ/XAI) to enable answers."
+    "AI answers are not set up on this server yet, so I cannot compose an answer. The most relevant code for "
+    "your question is listed in the sources below (ranked by keyword relevance)."
 )
 
 
@@ -155,11 +154,13 @@ async def ask_stream(
                     yield {"type": "delta", "text": piece}
                 answered_by = last_answered_by.get()
             except LLMError as e:
-                note = f"LLM error: {e}" if not parts else f"\n\n_(the answer was cut off: {e})_"
+                log.warning("chat stream failed: %s", e)
+                note = public_error(e) if not parts else "\n\n_(the answer was cut off; please ask again)_"
                 parts.append(note)
                 yield {"type": "delta", "text": note}
             except Exception as e:  # noqa: BLE001 - a provider failing mid-answer
-                note = f"\n\n_(the answer was cut off: {type(e).__name__})_"
+                log.warning("chat stream failed mid-answer: %s", e)
+                note = "\n\n_(the answer was cut off; please ask again)_"
                 parts.append(note)
                 yield {"type": "delta", "text": note}
         else:

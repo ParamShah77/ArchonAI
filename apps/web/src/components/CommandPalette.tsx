@@ -108,7 +108,7 @@ export function CommandPalette() {
         href: `/repos/${r.id}`,
       });
     }
-    all.push({ key: "add", group: "Actions", label: "Add a repository", icon: <Plus size={14} />, href: "/?add=1" });
+    all.push({ key: "add", group: "Actions", label: "Add a repository", icon: <Plus size={14} />, href: "/repos?add=1" });
     const ranked = all
       .map((it) => ({ it, s: Math.max(score(it.label, t), score(`${it.group} ${it.label}`, t) * 0.5) }))
       .filter((x) => x.s > 0);
@@ -142,7 +142,7 @@ export function CommandPalette() {
     if (!it) return;
     close();
     // "add a repository" on the home page just focuses the add box
-    if (it.key === "add" && pathname === "/") window.dispatchEvent(new Event("archon:add"));
+    if (it.key === "add" && pathname === "/repos") window.dispatchEvent(new Event("archon:add"));
     else router.push(it.href);
   };
   const onKey = (e: React.KeyboardEvent) => {

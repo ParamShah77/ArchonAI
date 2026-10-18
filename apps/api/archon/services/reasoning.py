@@ -36,15 +36,15 @@ SYSTEM = (
 
 
 async def _llm_json(prompt: str, max_tokens: int = 4096) -> tuple[Any | None, str | None]:
-    from archon.llm import LLMError, complete_json, llm_available
+    from archon.llm import AI_NOT_CONFIGURED, LLMError, complete_json, llm_available, public_error
 
     if not llm_available():
-        return None, "No LLM provider configured (set GEMINI_API_KEY, GROQ_API_KEY or XAI_API_KEY)."
+        return None, AI_NOT_CONFIGURED
     try:
         return await complete_json(prompt, system=SYSTEM, max_tokens=max_tokens), None
     except (LLMError, Exception) as e:  # noqa: BLE001
         log.warning("reasoning LLM call failed: %s", e)
-        return None, f"{type(e).__name__}: {e}"
+        return None, public_error(e)
 
 
 async def _retrieved(

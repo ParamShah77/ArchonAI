@@ -75,7 +75,7 @@ async def test_ingest_local_repo_and_query_graph(client: AsyncClient, fixture_re
     assert bad.status_code in (400, 404)
 
     arch = (await client.get(f"/repos/{rid}/architecture")).json()
-    assert arch["ai"] is None and "No LLM provider" in arch["ai_error"]
+    assert arch["ai"] is None and "not set up" in arch["ai_error"]
     assert {c["name"] for c in arch["components"]} >= {"app", "web", "migrations"}
     layers = {c["name"]: c["layer"] for c in arch["components"]}
     assert layers["migrations"] == "data" and layers["web"] == "frontend"

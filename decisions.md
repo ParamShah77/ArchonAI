@@ -632,3 +632,36 @@ Entries are never deleted; a reversed decision gets `Status: Superseded by D-xxx
   - New table `tool_runs`, created by `create_all` at startup.
   - `/repos/freshness` may take up to 8 s for unreachable remotes. It is only called once per homepage visit.
   - The non-streaming `POST /chat` stays for API users and tests.
+
+## D-035 — A real website at `/`, the app at `/repos`; no provider or model names anywhere in the interface
+- **Date:** 2026-10-18
+- **Status:** Accepted (moves the repository list of D-033 to `/repos`)
+- **Context:** The owner wants the home page to work like a product website ("first only about ARCHON, and then we get in the app"). The owner also wants no AI provider or model names shown anywhere.
+- **Decision:**
+  - **Routes:** `/` is a static landing page. The repository list moved to `/repos`. Every link that meant "the list" now points there: header, breadcrumb, switcher, quick jump, and "Add a repository" (`/repos?add=1` focuses the add box).
+  - **Landing page** (`app/page.tsx`, no data or requests), in this order:
+    - a hero with a drawn product preview (a code map and a streaming answer with citations; plain elements, no screenshots);
+    - the three questions ARCHON answers;
+    - six features;
+    - how it works in three steps;
+    - eight tools;
+    - three trust points (runs locally, read-only folders, facts before AI);
+    - a closing call to action and a footer.
+    - It uses the app's own tokens and dark palette. Motion is two fade-ups and a blinking caret, switched off with `prefers-reduced-motion`. It fits a phone without sideways scrolling.
+  - **One header** (`SiteHeader.tsx`): on `/` it is the website's navigation (Features, How it works, Tools, "Open ARCHON"). Elsewhere it is the app bar (Repositories plus the problem-only status chip).
+  - **No provider or model names in the interface:**
+    - The chat no longer shows "answered by …". The Tools and Overview pages no longer show the model.
+    - Errors people see come from `archon.llm.public_error()`. It says either "AI answers are not set up on this server yet…" or "The AI service did not answer this time…".
+    - Raw provider errors go only to the server log.
+    - Saved architecture reports are cleaned when served.
+    - The API still returns `answered_by` and `ai_model` for diagnostics, but the web app does not render them.
+  - **Health trend:** it now counts only scores recorded at or after a repository's first audit. A score computed before any audit has no findings and faked a drop.
+- **Alternatives considered:**
+  - Keeping the list at `/` with a hero above it: it mixes the website and the app, which is what the owner asked to separate.
+  - A separate marketing site: a second deployment for one page.
+  - Screenshots in the hero: they go stale with every UI change and are heavy. A drawn preview stays sharp and current.
+  - Hiding the provider in the API too: the diagnostics (`/health` chain status, `answered_by`) are useful to operators and are never shown to people.
+- **Why this one:** a newcomer first learns what ARCHON is and why it helps, then enters the app with one click. The interface talks about "AI" as one capability, not about vendors.
+- **Consequences:**
+  - Bookmarks to `/` now land on the website (one click to the app).
+  - The owner's uncommitted font change in `layout.tsx` was left unstaged. Only the header swap was committed.

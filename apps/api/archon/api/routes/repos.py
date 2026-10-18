@@ -88,23 +88,27 @@ async def _summaries(session: SessionDep) -> dict[str, RepoSummary]:
         s = get(rid)
         s.open_by_severity[sev] = n
         s.open_findings += n
-    snaps = await session.execute(
-        select(HealthSnapshot.repo_id, HealthSnapshot.score, HealthSnapshot.breakdown).order_by(
-            HealthSnapshot.created_at
-        )
-    )
-    for rid, score, breakdown in snaps:
-        s = get(rid)
-        s.health_history = [*s.health_history[-11:], round(score, 1)]
-        s.health_score = round(score, 1)
-        s.health_grade = str((breakdown or {}).get("grade", ""))
     runs = await session.execute(
-        select(AnalysisRun.repo_id, func.max(AnalysisRun.finished_at))
+        select(AnalysisRun.repo_id, func.min(AnalysisRun.started_at), func.max(AnalysisRun.finished_at))
         .where(AnalysisRun.status == "done")
         .group_by(AnalysisRun.repo_id)
     )
-    for rid, at in runs:
+    first_audit: dict[str, datetime] = {}
+    for rid, first, at in runs:
         get(rid).last_analysis_at = at
+        first_audit[rid] = _aware(first)
+    # health scores before the first audit were computed without findings; they would fake a drop in the trend
+    snaps = await session.execute(
+        select(
+            HealthSnapshot.repo_id, HealthSnapshot.score, HealthSnapshot.breakdown, HealthSnapshot.created_at
+        ).order_by(HealthSnapshot.created_at)
+    )
+    for rid, score, breakdown, created in snaps:
+        s = get(rid)
+        s.health_score = round(score, 1)
+        s.health_grade = str((breakdown or {}).get("grade", ""))
+        if rid in first_audit and _aware(created) >= first_audit[rid]:
+            s.health_history = [*s.health_history[-11:], round(score, 1)]
     convs = await session.execute(
         select(Conversation.repo_id, func.count(), func.max(Conversation.created_at)).group_by(Conversation.repo_id)
     )

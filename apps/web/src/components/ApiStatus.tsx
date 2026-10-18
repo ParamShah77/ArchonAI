@@ -17,7 +17,7 @@ export function ApiStatus() {
     );
   if (data && !data.llm_configured)
     return (
-      <span className="chip border-warn/40 text-warn" title="No LLM key configured — AI features are disabled">
+      <span className="chip border-warn/40 text-warn" title="No AI key is configured on the server, so AI answers are turned off">
         AI off
       </span>
     );
